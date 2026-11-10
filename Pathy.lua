@@ -21,12 +21,12 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 
 -- Settings (PathyDB holds only what was changed; /pathy config opens the window)
 local DEFAULTS = {
-	arrow = true, arrowSize = 0.55, arrowAlpha = 0.55, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = false,
-	arrowText = true, arrowX = 0.5, arrowY = 0.66,
-	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.6,
-	dots = true, dotSize = 0.6, dotAlpha = 0.5, dotColour = { 0.8, 0.8, 0.8 }, dotSpacing = 4, dotRange = 60,
-	smooth = 25, minimapButton = true, minimapTrail = true,
-	usePin = true, estimate = true, camPitch = 20, followTracked = true,
+	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
+	arrowText = true, arrowX = 0.5, arrowY = 0.31,
+	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
+	dots = false, dotSize = 0.6, dotAlpha = 1, dotColour = { 0.8, 0.8, 0.8 }, dotSpacing = 4, dotRange = 60,
+	smooth = 60, minimapButton = true, minimapTrail = false,
+	usePin = true, estimate = true, camPitch = 9, followTracked = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
@@ -399,13 +399,22 @@ local function objectiveAreas(questId)
 	for i, p in ipairs(pts) do
 		if not used[i] then
 			local sx, sy, n = 0, 0, 0
+			local members = {}
 			for j, q in ipairs(pts) do
 				if not used[j] and q.instance == p.instance and dist(p.x, p.y, q.x, q.y) <= OBJECTIVE_GROUP then
 					used[j] = true
 					sx, sy, n = sx + q.x, sy + q.y, n + 1
+					members[#members + 1] = q
 				end
 			end
-			areas[#areas + 1] = { x = sx / n, y = sy / n, instance = p.instance, uiMap = p.uiMap, name = p.name or "the objective" }
+			-- the group's real spawn nearest its centre (a plain average can land in rock or off the walkable ground)
+			local cx, cy = sx / n, sy / n
+			local best, bestD = p, math.huge
+			for _, q in ipairs(members) do
+				local d = dist(cx, cy, q.x, q.y)
+				if d < bestD then best, bestD = q, d end
+			end
+			areas[#areas + 1] = { x = best.x, y = best.y, instance = best.instance, uiMap = best.uiMap, name = p.name or "the objective" }
 		end
 	end
 	return areas
@@ -414,13 +423,15 @@ end
 local function goObjective(questId)
 	local quest = questName(questId) or ("quest " .. questId)
 	local saved = { questId = questId, kind = "objective" }
-	local area = questAreaCentre(questId)
-	if area then
-		return goTo({ area }, { quest = quest, questId = questId, kind = "objective", what = "the area for " .. quest, saved = saved })
-	end
+	-- Questie's real spawn spots first (where the mob / object actually is); the game's quest-area centre is only
+	-- a blob's middle, which for a "kill X" quest can be nowhere near any X.
 	local areas = objectiveAreas(questId)
 	if #areas > 0 then
 		return goTo(areas, { quest = quest, questId = questId, kind = "objective", what = "objective for " .. quest, saved = saved })
+	end
+	local area = questAreaCentre(questId)
+	if area then
+		return goTo({ area }, { quest = quest, questId = questId, kind = "objective", what = "the area for " .. quest, saved = saved })
 	end
 	go(questId, "turnin")
 end
@@ -1008,15 +1019,14 @@ local function buildLists()
 				action = function() go(id, "turnin") end, key = "turnin:" .. id }
 		else
 			-- where the objective is: the quest's area, else the nearest group of objective spots
-			local goal, goalD, what = questAreaCentre(id), nil, "Quest area"
+			local goal, goalD, what = nil, nil, "Objective"
+			for _, a in ipairs(objectiveAreas(id)) do
+				local d = px and a.instance == instance and dist(px, py, a.x, a.y)
+				if d and (not goalD or d < goalD) then goal, goalD = a, d end
+			end
 			if not goal then
-				what = "Objective"
-				for _, a in ipairs(objectiveAreas(id)) do
-					local d = px and a.instance == instance and dist(px, py, a.x, a.y)
-					if d and (not goalD or d < goalD) then goal, goalD = a, d end
-				end
-			elseif px and goal.instance == instance then
-				goalD = dist(px, py, goal.x, goal.y)
+				goal, what = questAreaCentre(id), "Quest area"
+				if goal and px and goal.instance == instance then goalD = dist(px, py, goal.x, goal.y) end
 			end
 			local sub = goal and format("%s%s  %s", what, goal.name and goal.name ~= "the quest area" and (": " .. goal.name) or "",
 				goalD and yards(goalD) or "(other continent)") or format("Turn in to %s  %s", who, nearD and yards(nearD) or "(other continent)")
