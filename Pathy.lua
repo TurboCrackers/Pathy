@@ -626,6 +626,24 @@ local function hookKnownTaxi()
 end
 
 local function hookPathfinder()
+	-- Pathfinder only lets a trip walk within one "piece" of the map, and takes the player's piece from the single
+	-- nearest map node. When that node is a stray fragment, walking is ruled out and the plan starts with a flight
+	-- (a route "to the flight master" 20 yards off for an NPC 4 yards away). For a target this near, walk.
+	local originalTrip = PF.PlanTrip
+	if originalTrip then
+		PF.PlanTrip = function(px, py, ...)
+			local r = originalTrip(px, py, ...)
+			local trip, g, pl = PF.trip, PF.goal, PF.player
+			local leg = trip and trip.next
+			-- 400 yards: a flight never beats walking to somewhere this near
+			if target and leg and leg.kind == "flight" and g and pl and px and g.instance == pl.instance
+				and dist(px, py, g.x, g.y) < 400 then
+				PF.trip, PF.riding = nil, nil
+				PF.dest = { instance = g.instance, x = g.x, y = g.y, z = g.z }
+			end
+			return r
+		end
+	end
 	local original = PF.GetTarget
 	PF.GetTarget = function(...)
 		if target and not PF.service and not UnitIsGhost("player") then
@@ -1272,8 +1290,8 @@ local TWO_PI = 2 * pi
 local DOT_TEX = "Interface\\AddOns\\Guidelime_Pathfinder\\Media\\dot" -- Pathfinder's dot image
 local DOT_COLOUR = { 0.62, 1, 0.25 }
 local MAX_DOTS = 48
-local AHEAD_DOTS = 8       -- most dots averaged for the arrow's direction
-local LOOKAHEAD = 10       -- yards: only dots this near ahead are averaged, so the arrow follows bends instead of cutting them
+local AHEAD_DOTS = 16      -- most dots averaged for the arrow's direction
+local LOOKAHEAD = 20       -- yards: only dots this near ahead are averaged, so the arrow follows bends instead of cutting them
 local VFOV_PER_FOV = 0.6   -- the game's vertical field of view is 0.6 x the cameraFov setting
 local MIN_MARKER = 6       -- yards: a marker nearer than this is too close to solve the camera against
 local BELOW_COST, FLOOR_SLACK = 4, 0.5
@@ -1282,7 +1300,7 @@ local FRESH = 0.1          -- seconds the dots keep using a camera without a new
 local SNAP = 0.035         -- radians (about 2 degrees): a camera change this big is a real move, not noise
 local RECENT = 10          -- seconds a learned camera turn and tilt are still used with nothing to line up with
 local CLIMB = 2.5          -- yards the next dots rise or fall before it says "up" / "down"
-local TURN_RATE = 10       -- how fast the arrow catches up with the direction (higher = snappier)
+local TURN_RATE = 6        -- how fast the arrow catches up with the direction (higher = snappier)
 
 local function dotSpacing() return cfg("dotSpacing") end
 
@@ -1369,10 +1387,10 @@ local function fit(facing, F, d, ox, oy, m, floorZ)
 		if not yaw or abs(pitch) >= 1.55 then return end
 		local below = max(0, floorZ - FLOOR_SLACK - (F[3] + d * sin(pitch)))
 		local score = 0.5 * abs(wrap(yaw - facing)) + BELOW_COST * below
-		if cam.yaw then score = score + abs(wrap(yaw - cam.yaw)) + abs(pitch - cam.pitch) end
+		if cam.yaw and cam.pitch then score = score + abs(wrap(yaw - cam.yaw)) + abs(pitch - cam.pitch) end
 		if not best or score < best then best, bestYaw, bestPitch = score, wrap(yaw), pitch end
 	end
-	if cam.yaw then try(cam.yaw, cam.pitch) end
+	if cam.yaw and cam.pitch then try(cam.yaw, cam.pitch) end
 	for _, dy in ipairs({ 0, 0.8, -0.8, pi }) do
 		for _, p0 in ipairs({ cam.pitch or 0.3, 0.9, -0.3 }) do try(facing + dy, p0) end
 	end
@@ -1849,6 +1867,9 @@ local function frame(dt)
 					z = PF.Graph.GroundZ(instance, x, y, lineZ, 0) or lineZ
 					if abs(z - lineZ) > LAYER_JUMP then z = lineZ end
 				end
+				-- a straight line (no walk grid here) says nothing about the ground it crosses: following the height
+				-- map along it climbs onto roofs and over buildings, so keep the dots level with the player
+				if not p.graph then z = pz end
 				local old = pts[k]
 				if not old then
 					pts[k] = { -x, y, z, unsure }
@@ -1904,6 +1925,16 @@ local function frame(dt)
 		aE, aN, aU = -p.x[p.n], p.y[p.n], p.z and p.z[p.n] or pz
 	end
 	local dE, dN, dU = aE + px, aN - py, aU - pz
+	-- Close to the target: point straight at it and give the straight distance. The walked route can wind round a
+	-- counter or a corner (22 yd of route to someone 4 yd away), which is no help once you can see them.
+	smooth.nearDist = nil
+	if target.instance == instance then
+		local sd = dist(px, py, target.x, target.y)
+		if sd < 12 then
+			dE, dN, dU = px - target.x, target.y - py, 0
+			smooth.nearDist = sd
+		end
+	end
 	local l = sqrt(dE * dE + dN * dN + dU * dU)
 	if l > 1e-3 then
 		dE, dN, dU = dE / l, dN / l, dU / l
@@ -1916,7 +1947,7 @@ local function frame(dt)
 			smooth.U = smooth.U + (dU - smooth.U) * k
 		end
 	end
-	return n, true, aU - pz
+	return n, true, p.graph and (aU - pz) or 0
 end
 
 local errors = {}
@@ -1966,7 +1997,8 @@ driver:SetScript("OnUpdate", function(_, dt)
 			-- at a flight master, a dock, the tram: what to do here (shown even with the arrow's text off)
 			arrow.climb:SetText("|cff66ccff" .. ride .. "|r")
 			local p = PF.path
-			arrow.dist:SetText(cfg("arrowText") and p and p.remaining and format("%d yd", floor(p.remaining + 0.5)) or "")
+			local rem = smooth.nearDist or (p and p.remaining)
+			arrow.dist:SetText(cfg("arrowText") and rem and format("%d yd", floor(rem + 0.5)) or "")
 		elseif cfg("arrowText") then
 			if climb and climb > CLIMB then
 				arrow.climb:SetText("^ up")
@@ -1976,7 +2008,8 @@ driver:SetScript("OnUpdate", function(_, dt)
 				arrow.climb:SetText("")
 			end
 			local p = PF.path
-			arrow.dist:SetText(p and p.remaining and format("%d yd", floor(p.remaining + 0.5)) or "")
+			local rem = smooth.nearDist or (p and p.remaining)
+			arrow.dist:SetText(rem and format("%d yd", floor(rem + 0.5)) or "")
 		else
 			arrow.climb:SetText("")
 			arrow.dist:SetText("")
