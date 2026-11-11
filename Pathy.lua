@@ -24,7 +24,7 @@ local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
 	arrowText = true, arrowX = 0.5, arrowY = 0.31,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
-	dots = false, dotSize = 0.6, dotAlpha = 1, dotColour = { 0.8, 0.8, 0.8 }, dotSpacing = 4, dotRange = 60,
+	dots = false, dotSize = 0.6, dotAlpha = 1, dotColour = { 0.8, 0.8, 0.8 }, dotSpacing = 4, dotRange = 60, arrowAhead = 40, windowAlpha = 0.92, uiScale = 1,
 	smooth = 60, minimapButton = true, minimapTrail = false,
 	usePin = true, estimate = true, camPitch = 9, followTracked = true,
 }
@@ -81,6 +81,16 @@ local function questSpots(questId, field)
 		end
 	end
 	return out
+end
+
+-- a quest as Questie writes it: "[level] name" in the colour of its difficulty (plain name if Questie cannot)
+local function coloredQuest(questId, fallback)
+	local Lib = questie("QuestieLib")
+	if Lib and Lib.GetColoredQuestName then
+		local ok, text = pcall(Lib.GetColoredQuestName, Lib, questId, true, false)
+		if ok and text then return text end
+	end
+	return fallback
 end
 
 local function questName(questId)
@@ -473,7 +483,7 @@ end
 -- There is no "arrived": guiding ends when the quest is accepted / turned in, or /pathy stop.
 -- Group members: the game gives addons their positions (out in the world, not inside dungeons), so Pathy can
 -- walk you to them and follow as they move. Friends outside your group: only their zone is known.
-local FOLLOW_MOVE = 15 -- yards a group member moves before the route is planned again
+local FOLLOW_MOVE = 5  -- yards a group member moves before the route is planned again
 
 local function unitByGuid(guid)
 	if not guid then return end
@@ -537,9 +547,36 @@ local pinNoted
 -- Rerouting from where you are: the walking route is planned again every couple of seconds as you move, and at
 -- once when you stray from it; the whole trip (walk, fly, sail...) is looked at again every so often.
 local reroute = { at = 0, trip = 0, x = 0, y = 0, EVERY = 2, OFF = 6, TRIP_EVERY = 10 }
+
+-- Riding a boat, zeppelin or other transport: the game has no check for it, but it shows in the numbers. The
+-- position changes fast while the character's own speed does not (it stands on the deck). True while that holds;
+-- ends when the position is still, or the character's speed accounts for the movement again.
+function reroute.update(px, py)
+	local b = reroute.b
+	if not b then b = {}; reroute.b = b end
+	if not px then return b.on end
+	local now = GetTime()
+	if not b.t then b.x, b.y, b.t = px, py, now; return b.on end
+	if now - b.t < 0.25 then return b.on end
+	local d, dt = dist(px, py, b.x, b.y), now - b.t
+	b.x, b.y, b.t = px, py, now
+	local measured = d / dt
+	local own = GetUnitSpeed("player") or 0
+	if d > 60 then
+		b.since, b.on = nil, false -- a jump (teleport, loading), not a ride
+	elseif measured > 3 and own < measured * 0.5 and not UnitOnTaxi("player") and not (IsFalling and IsFalling()) then
+		b.since = b.since or now
+		if now - b.since > 1 then b.on = true end
+	elseif measured < 1.5 or own >= measured * 0.8 then
+		b.since, b.on = nil, false
+	end
+	return b.on
+end
+
 local function rerouteFromHere()
 	local p = PF.path
 	if not p or not p.graph or PF.planning or PF.riding or PF.flying or not PF.Plan then return end
+	if reroute.b and reroute.b.on then return end -- on a moving boat: no use planning
 	if PF.trip and PF.trip.boarded then return end -- waiting at a dock or a flight master: leave the plan be
 	local px, py = HBD():GetPlayerWorldPosition()
 	if not px then return end
@@ -659,7 +696,7 @@ local function hookPathfinder()
 				pinNoted = true
 				Print("you placed a map pin, so it stays: the dots pause until you remove it (|cffffff00/pathy pin|r goes there instead)")
 			end
-			if target.guid and GetTime() - (target.checked or 0) > 0.5 then
+			if target.guid and GetTime() - (target.checked or 0) > 0.2 then
 				target.checked = GetTime()
 				local u = unitByGuid(target.guid)
 				local x, y, inst
@@ -718,7 +755,8 @@ local ROW_H = 30
 f = CreateFrame("Frame", "PathyFrame", UIParent, "BackdropTemplate")
 f:SetSize(360, 520)
 f:SetPoint("CENTER")
-f:SetFrameStrata("DIALOG")
+f:SetFrameStrata("MEDIUM")
+f:SetToplevel(true) -- comes to the front when clicked, behind the game's own windows otherwise
 f:SetMovable(true)
 f:EnableMouse(true)
 f:SetClampedToScreen(true)
@@ -736,17 +774,48 @@ f:SetBackdrop({
 	insets = { left = 4, right = 4, top = 4, bottom = 4 },
 })
 f:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
+-- everything inside the window hangs from this: it fills the window and carries the UI scale (the window itself keeps its size)
+local content = CreateFrame("Frame", nil, f)
+content:SetPoint("TOPLEFT")
+content:SetPoint("BOTTOMRIGHT")
+-- the look the settings and saved size give it (background opacity, size)
+function f.ApplyLook()
+	f:SetBackdropColor(0.05, 0.05, 0.08, cfg("windowAlpha"))
+	f:SetBackdropBorderColor(1, 1, 1, cfg("windowAlpha"))
+	content:SetScale(cfg("uiScale"))
+	if f.Relayout then f.Relayout() end
+	local size = PathyDB and PathyDB.size
+	if size and size[1] and size[2] then f:SetSize(size[1], size[2]) end
+end
+-- resizing: a grip in the bottom right corner
+f:SetResizable(true)
+if f.SetResizeBounds then f:SetResizeBounds(300, 300, 800, 1000)
+elseif f.SetMinResize then f:SetMinResize(300, 300) end
+local grip = CreateFrame("Button", nil, f)
+grip:SetSize(16, 16)
+grip:SetPoint("BOTTOMRIGHT", -3, 3)
+grip:SetFrameLevel(f:GetFrameLevel() + 10)
+grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+grip:SetScript("OnMouseDown", function() f:StartSizing("BOTTOMRIGHT") end)
+grip:SetScript("OnMouseUp", function()
+	f:StopMovingOrSizing()
+	PathyDB.size = { floor(f:GetWidth() + 0.5), floor(f:GetHeight() + 0.5) }
+	local point, _, rel, x, y = f:GetPoint()
+	PathyDB.pos = { point, rel, x, y }
+end)
 f:Hide()
 tinsert(UISpecialFrames, "PathyFrame") -- Escape closes it
 
-local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+local title = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 title:SetPoint("TOPLEFT", 14, -12)
 title:SetText("Pathy")
 
-local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+local close = CreateFrame("Button", nil, content, "UIPanelCloseButton")
 close:SetPoint("TOPRIGHT", -2, -2)
 
-local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+local status = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 status:SetPoint("TOPLEFT", 14, -36)
 status:SetPoint("RIGHT", -14, 0)
 status:SetJustifyH("LEFT")
@@ -799,7 +868,7 @@ local function iconFor(key) return ICONS[key] or ICONS.npc end
 
 -- one row of buttons under the title, each with its icon
 local function toolButton(text, icon, x, fn)
-	local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	local b = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
 	b:SetSize(80, 24)
 	b:SetPoint("TOPLEFT", x, -54)
 	b:SetText("     " .. text)
@@ -816,9 +885,10 @@ toolButton("Settings", ICONS.settings, 178, function() PathySettings:SetShown(no
 toolButton("Stop", ICONS.stop, 261, function() if target then stop("stopped") else Print("not guiding anywhere") end end)
 
 -- the search box: filters every section, by its heading too
-local search = CreateFrame("EditBox", "PathySearchBox", f, "InputBoxTemplate")
-search:SetSize(320, 20)
+local search = CreateFrame("EditBox", "PathySearchBox", content, "InputBoxTemplate")
+search:SetHeight(20)
 search:SetPoint("TOPLEFT", 20, -86)
+search:SetPoint("TOPRIGHT", -20, -86)
 search:SetAutoFocus(false)
 search:SetMaxLetters(60)
 search.hint = search:CreateFontString(nil, "OVERLAY", "GameFontDisable")
@@ -829,12 +899,48 @@ search.clear:SetSize(20, 20)
 search.clear:SetPoint("RIGHT", 2, 0)
 search.clear:Hide()
 
-local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-scroll:SetPoint("TOPLEFT", 10, -112)
-scroll:SetPoint("BOTTOMRIGHT", -30, 12)
+local scroll = CreateFrame("ScrollFrame", nil, content, "UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT", 10, -140)
+scroll:SetPoint("BOTTOMRIGHT", -30, 22)
 local child = CreateFrame("Frame", nil, scroll)
 child:SetSize(316, 10)
 scroll:SetScrollChild(child)
+scroll:SetScript("OnSizeChanged", function(_, w) if w and w > 0 then child:SetWidth(w) end end)
+
+-- the tabs: Quests, Places, NPCs (a search looks in all of them)
+local TABS = { { "quests", "Quests" }, { "places", "Places" }, { "npcs", "NPCs" } }
+local tabButtons = {}
+local function currentTab()
+	local t = PathyDB and PathyDB.tab
+	for _, tab in ipairs(TABS) do if tab[1] == t then return t end end
+	return "quests"
+end
+for i, tab in ipairs(TABS) do
+	local b = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+	b:SetHeight(22)
+	b:SetText(tab[2])
+	b.key = tab[1]
+	-- three equal buttons across the window
+	local gap = 4
+	b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * 2, -112)
+	b:SetScript("OnClick", function()
+		PathyDB.tab = tab[1]
+		scroll:SetVerticalScroll(0)
+		f.Refresh()
+	end)
+	tabButtons[i] = b
+end
+local function layoutTabs()
+	local w = (f:GetWidth() / cfg("uiScale") - 24 - 8) / 3
+	for i, b in ipairs(tabButtons) do
+		b:SetWidth(w)
+		b:ClearAllPoints()
+		b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * (w + 4), -112)
+	end
+end
+f:HookScript("OnSizeChanged", layoutTabs)
+f.Relayout = layoutTabs
+layoutTabs()
 
 local rows = {}
 local function row(i)
@@ -870,6 +976,7 @@ local function place(r, y, depth, icon)
 	local x = 2 + depth * 14
 	r:ClearAllPoints()
 	r:SetPoint("TOPLEFT", 0, -y)
+	r:SetPoint("TOPRIGHT", 0, -y)
 	r.icon:ClearAllPoints()
 	r.icon:SetPoint("TOPLEFT", x, -5)
 	if icon then r.icon:SetTexture(icon); r.icon:Show() else r.icon:Hide() end
@@ -896,6 +1003,7 @@ local CLASS_NAMES = { WARRIOR = "Warrior", PALADIN = "Paladin", HUNTER = "Hunter
 	SHAMAN = "Shaman", MAGE = "Mage", WARLOCK = "Warlock", DRUID = "Druid", DEATHKNIGHT = "Death Knight",
 	MONK = "Monk", DEMONHUNTER = "Demon Hunter", EVOKER = "Evoker" }
 local townCache -- { groups = { { title, icon, types = { { name, icon, spots } } } }, plain = { { name, icon, spots } } }
+local HUNTER_PET_TRAINERS = { [3702] = true } -- Alanndarian Nightsong: a pet trainer (the title decides the rest)
 
 local function titleCase(key) return (key:sub(1, 1) .. key:sub(2):lower():gsub("_(%a)", function(c) return " " .. c:upper() end)) end
 
@@ -933,9 +1041,26 @@ local function townsfolk()
 		local ids = type(lists) == "table" and lists["Class Trainer"]
 		if ids and #ids > 0 then
 			local name = CLASS_NAMES[class] or titleCase(class)
-			local spots = spotsFor(ids)
-			if #spots > 0 then
-				classes.types[#classes.types + 1] = { name = name, icon = "Interface\\Icons\\ClassIcon_" .. name:gsub(" ", ""), spots = spots }
+			local icon = "Interface\\Icons\\ClassIcon_" .. name:gsub(" ", "")
+			if class == "HUNTER" then
+				-- Questie lumps hunter and pet trainers (and some of Forever's hunter trainers) together: split them
+				-- by the NPC's title, with the known mislabelled ones put right
+				local hunters, pets = {}, {}
+				for _, id in ipairs(ids) do
+					local sub = (DB.QueryNPCSingle(id, "subName") or ""):lower()
+					local isPet = sub:find("pet", 1, true) and not sub:find("hunter", 1, true)
+					if HUNTER_PET_TRAINERS[id] then isPet = true end
+					local into = isPet and pets or hunters
+					into[#into + 1] = id
+				end
+				local hs, ps = spotsFor(hunters), spotsFor(pets)
+				if #hs > 0 then classes.types[#classes.types + 1] = { name = name, icon = icon, spots = hs } end
+				if #ps > 0 then classes.types[#classes.types + 1] = { name = "Hunter Pet Trainers", icon = icon, spots = ps } end
+			else
+				local spots = spotsFor(ids)
+				if #spots > 0 then
+					classes.types[#classes.types + 1] = { name = name, icon = icon, spots = spots }
+				end
 			end
 		end
 	end
@@ -1015,6 +1140,12 @@ local function typeEntries(t, px, py, instance)
 	return list
 end
 
+-- the continents (uiMap, fallback name) and their cities
+local PLACES = {
+	{ 1415, "Eastern Kingdoms", cities = { { 1453, "Stormwind City" }, { 1455, "Ironforge" }, { 1458, "Undercity" } } },
+	{ 1414, "Kalimdor", cities = { { 1454, "Orgrimmar" }, { 1456, "Thunder Bluff" }, { 1457, "Darnassus" } } },
+}
+
 -- The lists shown in the window: nodes { title, icon, list = entries, children = nodes, closed (by default),
 -- empty }; entries { top, sub, icon, action, key (what is being guided to) }.
 local function buildLists()
@@ -1032,7 +1163,7 @@ local function buildLists()
 		local id = q.id
 		local e
 		if q.complete then
-			e = { top = q.title or questName(id) or ("quest " .. id), icon = ICONS.turnin,
+			e = { top = coloredQuest(id, q.title or questName(id) or ("quest " .. id)), icon = ICONS.turnin,
 				sub = format("Turn in to %s  %s", who, nearD and yards(nearD) or "(other continent)"),
 				action = function() go(id, "turnin") end, key = "turnin:" .. id }
 		else
@@ -1048,7 +1179,7 @@ local function buildLists()
 			end
 			local sub = goal and format("%s%s  %s", what, goal.name and goal.name ~= "the quest area" and (": " .. goal.name) or "",
 				goalD and yards(goalD) or "(other continent)") or format("Turn in to %s  %s", who, nearD and yards(nearD) or "(other continent)")
-			e = { top = q.title or questName(id) or ("quest " .. id), icon = ICONS.progress, sub = sub,
+			e = { top = coloredQuest(id, q.title or questName(id) or ("quest " .. id)), icon = ICONS.progress, sub = sub,
 				action = function() goObjective(id) end, key = "objective:" .. id }
 		end
 		local list = q.complete and turnin or progress
@@ -1060,7 +1191,7 @@ local function buildLists()
 		for _, a in ipairs(availableQuests(px, py, instance)) do
 			local icon = { x = a.x, y = a.y, instance = a.instance, uiMap = a.uiMap, name = a.name }
 			local id = a.id
-			avail[#avail + 1] = { top = a.title, sub = format("Start with %s  %s%s", a.name or "?", yards(a.d), a.low and "  |cff999999(low level)|r" or ""), icon = ICONS.giver,
+			avail[#avail + 1] = { top = coloredQuest(a.id, a.title), sub = format("Start with %s  %s%s", a.name or "?", yards(a.d), a.low and "  |cff999999(low level)|r" or ""), icon = ICONS.giver,
 				action = function() go(id, "giver", icon) end, key = "giver:" .. id }
 		end
 		nodes[#nodes + 1] = { title = "Quest givers nearby", icon = ICONS.giver, list = avail,
@@ -1101,6 +1232,58 @@ local function buildLists()
 	end
 	if #friends > 0 then nodes[#nodes + 1] = { title = "Friends online", icon = ICONS.friend, list = friends, closed = true } end
 
+	-- Cities and continents, nested: each continent holds its cities, each city its sub-areas (the maps the game
+	-- lists under it). Clicking one guides to the middle of its map; a trip across the sea or by flight is planned
+	-- as usual.
+	local function placeEntry(mapID, fallback, what)
+		local x, y, inst = HBD():GetWorldCoordinatesFromZone(0.5, 0.5, mapID)
+		if not x then return end
+		local info = C_Map.GetMapInfo and C_Map.GetMapInfo(mapID)
+		local name = info and info.name or fallback
+		local spot = { x = x, y = y, instance = inst, uiMap = mapID, name = name }
+		local d = px and inst == instance and dist(px, py, x, y)
+		return { top = name, icon = ICONS.pin, d = d or 1e9, key = "place:" .. mapID,
+			sub = d and yards(d) or (what == "continent" and "continent" or "other continent"),
+			action = function()
+				goTo({ spot }, { name = name, kind = "spot", what = what,
+					saved = { kind = "spot", x = x, y = y, instance = inst, uiMap = mapID, name = name } })
+			end }, name
+	end
+	local byDistance = function(a, b) if a.d ~= b.d then return a.d < b.d end return a.top < b.top end
+	local known = {}
+	for _, c in ipairs(PLACES) do
+		known[c[1]] = true
+		for _, city in ipairs(c.cities) do known[city[1]] = true end
+	end
+	local continents = {}
+	for _, c in ipairs(PLACES) do
+		local centry, cname = placeEntry(c[1], c[2], "continent")
+		if centry then
+			local cities = {}
+			for _, city in ipairs(c.cities) do
+				local entry, name = placeEntry(city[1], city[2], "city")
+				if entry then
+					-- the map's own sub-areas (districts, quarters), nearest first
+					local subs = {}
+					for id, m in pairs(HBD().mapData or {}) do
+						if m.parent == city[1] and not known[id] then
+							local e = placeEntry(id, m.name or "?", "area")
+							if e then subs[#subs + 1] = e end
+						end
+					end
+					table.sort(subs, byDistance)
+					local list = { entry }
+					for _, e in ipairs(subs) do list[#list + 1] = e end
+					cities[#cities + 1] = { title = name, icon = ICONS.pin, list = list, closed = true, d = entry.d }
+				end
+			end
+			table.sort(cities, function(a, b) if a.d ~= b.d then return a.d < b.d end return a.title < b.title end)
+			continents[#continents + 1] = { title = cname, icon = ICONS.pin, list = { centry }, children = cities, closed = true, d = centry.d }
+		end
+	end
+	table.sort(continents, function(a, b) if a.d ~= b.d then return a.d < b.d end return a.title < b.title end)
+	nodes[#nodes + 1] = { title = "Cities & continents", icon = ICONS.pin, children = continents, closed = true }
+
 	-- NPCs by type: every type, always
 	local town = townsfolk()
 	local npcs = {}
@@ -1127,6 +1310,8 @@ local function targetKey()
 	if saved and saved.kind == "unit" then return "unit:" .. tostring(saved.guid) end
 end
 
+local function plain(s) return (s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")) end
+
 local function hasAll(text, words)
 	text = text:lower()
 	for word in words:gmatch("%S+") do
@@ -1141,7 +1326,7 @@ local function countShown(node, words, all)
 	all = all or (words and hasAll(node.title, words))
 	local n = 0
 	for _, e in ipairs(node.list or {}) do
-		if not words or all or hasAll(e.top .. " " .. e.sub, words) then n = n + 1 end
+		if not words or all or hasAll(plain(e.top .. " " .. e.sub), words) then n = n + 1 end
 	end
 	for _, c in ipairs(node.children or {}) do n = n + countShown(c, words, all) end
 	return n
@@ -1202,13 +1387,21 @@ function f.Refresh()
 		heading(node, depth, path, count, isClosed)
 		if isClosed then return end
 		for _, e in ipairs(node.list or {}) do
-			if not words or all or hasAll(e.top .. " " .. e.sub, words) then entryRow(e, depth + 1) end
+			if not words or all or hasAll(plain(e.top .. " " .. e.sub), words) then entryRow(e, depth + 1) end
 		end
 		for _, c in ipairs(node.children or {}) do emit(c, depth + 1, path, all) end
 	end
 
-	for _, node in ipairs(nodes) do emit(node, 0) end
-	if #npcs > 0 then
+	-- one tab at a time; a search looks in all of them
+	local tab = not words and currentTab() or nil
+	for _, b in ipairs(tabButtons) do
+		if b.key == (tab or currentTab()) and not words then b:LockHighlight() else b:UnlockHighlight() end
+	end
+	local PLACE_TITLES = { ["Group"] = true, ["Friends online"] = true, ["Cities & continents"] = true }
+	for _, node in ipairs(nodes) do
+		if not tab or (PLACE_TITLES[node.title] and "places" or "quests") == tab then emit(node, 0) end
+	end
+	if #npcs > 0 and (not tab or tab == "npcs") then
 		local shownAny = not words
 		if words then for _, n in ipairs(npcs) do if countShown(n, words) > 0 then shownAny = true break end end end
 		if shownAny then
@@ -1216,8 +1409,8 @@ function f.Refresh()
 			local r = row(i)
 			r.entry, r.node = nil, nil
 			r:EnableMouse(false)
-			r.top:SetText("|cff66ccffNPCs|r")
-			r.sub:SetText("|cff888888nearest first; click a heading to open it|r")
+			r.top:SetText(tab and "|cff888888Nearest first; click a heading to open it|r" or "|cff66ccffNPCs|r")
+			r.sub:SetText(tab and "" or "|cff888888nearest first; click a heading to open it|r")
 			place(r, y, 0, nil)
 			y = y + ROW_H
 			for _, node in ipairs(npcs) do emit(node, 0) end
@@ -1243,7 +1436,7 @@ function allEntries()
 	local out = {}
 	local function walk(node, words)
 		words = words .. " " .. node.title
-		for _, e in ipairs(node.list or {}) do out[#out + 1] = { e = e, text = (e.top .. " " .. e.sub .. words):lower() } end
+		for _, e in ipairs(node.list or {}) do out[#out + 1] = { e = e, text = plain(e.top .. " " .. e.sub .. words):lower() } end
 		for _, c in ipairs(node.children or {}) do walk(c, words) end
 	end
 	for _, n in ipairs(nodes) do walk(n, "") end
@@ -1290,8 +1483,8 @@ local TWO_PI = 2 * pi
 local DOT_TEX = "Interface\\AddOns\\Guidelime_Pathfinder\\Media\\dot" -- Pathfinder's dot image
 local DOT_COLOUR = { 0.62, 1, 0.25 }
 local MAX_DOTS = 48
-local AHEAD_DOTS = 16      -- most dots averaged for the arrow's direction
-local LOOKAHEAD = 20       -- yards: only dots this near ahead are averaged, so the arrow follows bends instead of cutting them
+
+local LOOKAHEAD = 40 -- yards: the arrow points at the average of the route this far ahead (a setting; this is the fallback)
 local VFOV_PER_FOV = 0.6   -- the game's vertical field of view is 0.6 x the cameraFov setting
 local MIN_MARKER = 6       -- yards: a marker nearer than this is too close to solve the camera against
 local BELOW_COST, FLOOR_SLACK = 4, 0.5
@@ -1543,7 +1736,7 @@ local LIGHT = { -0.35, 0.75, -0.56 } -- towards the light, in the camera's axes 
 
 local arrow = CreateFrame("Frame", "PathyArrow", UIParent)
 arrow:SetAllPoints()
-arrow:SetFrameStrata("MEDIUM")
+arrow:SetFrameStrata("LOW")
 arrow:Hide()
 arrow.climb = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 arrow.climb:SetPoint("CENTER")
@@ -1811,8 +2004,11 @@ local function frame(dt)
 	local p = PF.path
 	dbg.target, dbg.path, dbg.seg, dbg.service = target ~= nil, p ~= nil, p and p.seg ~= nil, PF.service ~= nil
 	dbg.view, dbg.cached, dbg.unsure, dbg.offscreen, dbg.drawn, dbg.firstZ, dbg.sx, dbg.sy = nil, 0, 0, 0, 0, nil, nil, nil
-	if not target or not p or not p.seg or PF.service or UnitIsGhost("player") or UnitOnTaxi("player") then
+	local bx, by = HBD():GetPlayerWorldPosition()
+	local onBoat = reroute.update(bx, by)
+	if not target or not p or not p.seg or PF.service or UnitIsGhost("player") or UnitOnTaxi("player") or onBoat then
 		dbg.reason = not target and "no target (pick something in the Pathy window)"
+			or onBoat and "you are on a moving boat: the route goes on when you get off"
 			or not p and "Pathfinder has no route right now"
 			or not p.seg and "the route has no segment yet"
 			or PF.service and "Pathfinder's own /gpath go is active (/gpath go to stop it)"
@@ -1837,6 +2033,9 @@ local function frame(dt)
 	local spacing = dotSpacing()
 	local view, ax, ay, back, base, total = anchor(p, spacing)
 	local range, size, alpha, colour = cfg("dotRange"), cfg("dotSize"), cfg("dotAlpha"), cfg("dotColour")
+	local lookahead = cfg("arrowAhead") or LOOKAHEAD
+	local reach = max(range, lookahead)
+	local aheadMax = math.ceil(lookahead / spacing) + 2
 	local drawDots = fresh and cfg("dots")
 	local n, nAhead = 0, 0
 	if view then
@@ -1846,7 +2045,7 @@ local function frame(dt)
 		local pts = dotCache.pts
 		dbg.view = true
 		local k0 = floor((total - base) / spacing + 0.5) -- the anchor's number
-		local kLast = max(0, k0 - math.ceil((range + back) / spacing))
+		local kLast = max(0, k0 - math.ceil((reach + back) / spacing))
 		local missing = false
 		for k = k0 - 1, kLast, -1 do if not pts[k] then missing = true break end end
 		-- Looked at again every couple of seconds as you go, so a dot put on the wrong level is put right; a
@@ -1858,7 +2057,7 @@ local function frame(dt)
 			-- the walk starts on the ground at the anchor, on the route's own level there
 			local lineZ0 = p.z and select(3, PF.PointOnSeg(p, view.seg, view.segT)) or pz
 			local z0 = hasGround and (PF.Graph.GroundZ(instance, ax, ay, lineZ0, 1) or lineZ0) or nil
-			PF.SampleGround(view, instance, ax, ay, z0, spacing, range + back, function(x, y, z, along, lineZ, unsure)
+			PF.SampleGround(view, instance, ax, ay, z0, spacing, reach + back, function(x, y, z, along, lineZ, unsure)
 				local k = floor((total - base - along) / spacing + 0.5)
 				if k < 0 then return end
 				-- the ground walk can step onto another level (the hillside over a cave, a bridge over the
@@ -1886,11 +2085,11 @@ local function frame(dt)
 			if not dbg.firstZ then dbg.firstZ = pt[3] end
 			local a = (k0 - k) * spacing - back -- yards ahead of the player along the route
 			if a >= 0.5 then
-				if nAhead < AHEAD_DOTS and (nAhead == 0 or a <= LOOKAHEAD) then
+				if nAhead < aheadMax and (nAhead == 0 or a <= lookahead) then
 					nAhead = nAhead + 1
 					ahead[nAhead] = pt
 				end
-				if drawDots and n < MAX_DOTS and a >= 1.5 and not pt[4] then
+				if drawDots and n < MAX_DOTS and a >= 1.5 and a <= range and not pt[4] then
 					local sx, sy, cf, dirz = project(pt[1], pt[2], pt[3] + 0.05)
 					if not sx then dbg.offscreen = dbg.offscreen + 1 end
 					if sx then
@@ -2113,9 +2312,10 @@ end
 local toggleSettings, applied, registerOptionsEntry
 do
 local S = CreateFrame("Frame", "PathySettings", UIParent, "BackdropTemplate")
-S:SetSize(600, 640)
+S:SetSize(600, 730)
 S:SetPoint("CENTER", 0, 40)
-S:SetFrameStrata("DIALOG")
+S:SetFrameStrata("MEDIUM")
+S:SetToplevel(true)
 S:SetMovable(true)
 S:EnableMouse(true)
 S:SetClampedToScreen(true)
@@ -2154,6 +2354,7 @@ function applied(key)
 		end
 	end
 	if key == "arrow" then updateArrowShown() end
+	if key == "windowAlpha" or key == "uiScale" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
@@ -2175,8 +2376,11 @@ local function checkbox(parent, key, label, x, y)
 	local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
 	cb:SetSize(24, 24)
 	cb:SetPoint("TOPLEFT", x, y)
-	local fs = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	local fs = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	fs:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+	fs:SetWidth((x < 300 and 296 or 586) - x - 30) -- wraps inside its column and the window
+	fs:SetJustifyH("LEFT")
+	fs:SetWordWrap(true)
 	fs:SetText(label)
 	cb:SetScript("OnClick", function(self) set(key, self:GetChecked() and true or false) end)
 	refreshers[#refreshers + 1] = function() cb:SetChecked(cfg(key) and true or false) end
@@ -2188,10 +2392,13 @@ local function slider(parent, key, label, x, y, lo, hi, step, fmt, factor)
 	factor = factor or 1
 	local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	fs:SetPoint("TOPLEFT", x, y)
+	fs:SetWidth(250) -- long labels wrap instead of running off the window
+	fs:SetJustifyH("LEFT")
+	fs:SetWordWrap(true)
 	local s = CreateFrame("Slider", nil, parent, "BackdropTemplate")
 	s:SetOrientation("HORIZONTAL")
 	s:SetSize(240, 16)
-	s:SetPoint("TOPLEFT", x, y - 14)
+	s:SetPoint("TOPLEFT", fs, "BOTTOMLEFT", 0, -2) -- under the label, however many lines it takes
 	s:SetBackdrop({ bgFile = "Interface\\Buttons\\UI-SliderBar-Background", edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
 		tile = true, tileSize = 8, edgeSize = 8, insets = { left = 3, right = 3, top = 6, bottom = 6 } })
 	s:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
@@ -2310,14 +2517,17 @@ button(S, "Reset text position", 150, L + 4, -544, function()
 	refreshSettings()
 end)
 
+slider(S, "windowAlpha", "Pathy window background opacity", L + 4, -584, 0, 1, 0.05, "%d%%", 100)
+slider(S, "uiScale", "Pathy window size (UI scale)", L + 4, -624, 0.5, 1.5, 0.05, "%d%%", 100)
 header(S, "Lining up the dots", R, -402)
 checkbox(S, "usePin", "Move my map pin along the route (exact dots)", R, -420)
 checkbox(S, "estimate", "Show dots with no map pin to line up with", R, -444)
 slider(S, "camPitch", "Camera tilt to assume then", R + 4, -476, 0, 70, 1, "%d")
 header(S, "Questie", R, -514)
 checkbox(S, "followTracked", "Guide to the quest I focus in Questie's tracker", R, -532)
+slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", R + 4, -562, 10, 120, 5, "%d yd")
 
-button(S, "Reset everything to defaults", 220, 190, -596, function()
+button(S, "Reset everything to defaults", 220, 190, -686, function()
 	for k in pairs(DEFAULTS) do PathyDB[k] = nil end
 	for k in pairs(DEFAULTS) do applied(k) end
 	refreshSettings()
@@ -2383,6 +2593,96 @@ local function guideToQuest(questId)
 	if kind == "objective" then goObjective(questId) else go(questId, kind) end
 end
 
+------------------------------------------------------------------------------------------------------------
+-- Right-click menus: "Pathy: guide me there" on a quest (Questie's tracker, the quest log) and on Questie's map
+-- and minimap icons.
+------------------------------------------------------------------------------------------------------------
+local ctx = {}
+
+-- start guiding to a quest from wherever it stands: objective, turn-in or giver
+function ctx.quest(questId)
+	questId = tonumber(questId)
+	if not questId or questId <= 0 then return end
+	local entry
+	for _, q in ipairs(questLog()) do if q.id == questId then entry = q break end end
+	local kind = not entry and "giver" or entry.complete and "turnin" or "objective"
+	if kind == "objective" then goObjective(questId) else go(questId, kind) end
+end
+
+ctx.TEXT = "Pathy: guide me there"
+
+-- a one-entry menu at the cursor, in Questie's own drop-down (the same one its tracker uses)
+function ctx.show(title, action)
+	local TM = questie("TrackerMenu")
+	local lib = LibStub and LibStub("LibUIDropDownMenuQuestie-4.0", true)
+	if not (lib and TM and TM.menuFrame) then return end
+	lib:EasyMenu({
+		{ text = title or "?", isTitle = true, notCheckable = true },
+		{ text = ctx.TEXT, notCheckable = true, func = function() lib:CloseDropDownMenus(); pcall(action) end },
+	}, TM.menuFrame, "cursor", 0, 0, "MENU")
+end
+
+-- the Questie icon the mouse is on: its tooltip is showing, owned by it
+function ctx.icon()
+	local owner = GameTooltip:IsShown() and GameTooltip:GetOwner()
+	if owner and owner.data and owner.x and owner.y and owner.UiMapID and owner.IsMouseOver and owner:IsMouseOver() then return owner end
+end
+
+-- right-clicks on an icon fall through to the map or minimap, which is where they are heard
+function ctx.onMapClick(_, button)
+	if button ~= "RightButton" then return end
+	local icon = ctx.icon()
+	if not icon then return end
+	local x, y, inst = HBD():GetWorldCoordinatesFromZone(icon.x / 100, icon.y / 100, icon.UiMapID)
+	if not x then return end
+	local name = icon.data.Name or "that spot"
+	local uiMap = icon.UiMapID
+	ctx.show(name, function()
+		goTo({ { x = x, y = y, instance = inst, uiMap = uiMap, name = name } }, { name = name, kind = "spot", what = "map icon",
+			saved = { kind = "spot", x = x, y = y, instance = inst, uiMap = uiMap, name = name } })
+	end)
+end
+
+function ctx.install()
+	if ctx.installed then return end
+	ctx.installed = true
+	-- Questie's tracker: the entry goes in under the quest's name
+	local TM = questie("TrackerMenu")
+	if TM and TM.GetMenuForQuest then
+		local original = TM.GetMenuForQuest
+		TM.GetMenuForQuest = function(self, quest)
+			local menu = original(self, quest)
+			if type(menu) == "table" and quest and quest.Id then
+				local id = quest.Id
+				table.insert(menu, math.min(2, #menu + 1), { text = ctx.TEXT, notCheckable = true,
+					func = function() pcall(ctx.quest, id) end })
+			end
+			return menu
+		end
+	end
+	-- the map and the minimap
+	local mapFrame = WorldMapFrame and (WorldMapFrame.ScrollContainer or WorldMapFrame)
+	if mapFrame and mapFrame.HookScript then mapFrame:HookScript("OnMouseUp", ctx.onMapClick) end
+	if Minimap and Minimap.HookScript then Minimap:HookScript("OnMouseUp", ctx.onMapClick) end
+	-- the game's own quest log
+	if QuestLogTitleButton_OnClick then
+		hooksecurefunc("QuestLogTitleButton_OnClick", function(self, button)
+			if button ~= "RightButton" then return end
+			local index = self.questLogIndex or (self:GetID() + (FauxScrollFrame_GetOffset and QuestLogListScrollFrame
+				and FauxScrollFrame_GetOffset(QuestLogListScrollFrame) or 0))
+			local info = C_QuestLog and C_QuestLog.GetInfo and C_QuestLog.GetInfo(index)
+			local id, title
+			if info and not info.isHeader then
+				id, title = info.questID, info.title
+			elseif GetQuestLogTitle then
+				local t, _, _, isHeader, _, _, _, qid = GetQuestLogTitle(index)
+				if not isHeader then id, title = qid, t end
+			end
+			if id and id > 0 then ctx.show(title, function() ctx.quest(id) end) end
+		end)
+	end
+end
+
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
@@ -2430,6 +2730,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 			f:SetPoint(p[1], UIParent, p[2], p[3], p[4])
 		end
 		updateArrowShown()
+		f.ApplyLook()
 		updateMinimapButton()
 		pcall(registerOptionsEntry)
 	elseif event == "PLAYER_LOGIN" then
@@ -2438,6 +2739,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 		end
 		hookPathfinder()
 		hookKnownTaxi()
+		pcall(ctx.install)
 		C_Timer.After(6, function() followReady = true end)
 		-- Questie's tracker: sending a quest to TomTom (its click binding) guides there too
 		local TU = questie("TrackerUtils")

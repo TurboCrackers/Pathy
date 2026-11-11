@@ -2,7 +2,7 @@
 ## Title: Pathy
 ## Notes: Pick a quest giver or turn-in and follow ground dots there along the real walkable path (caves and levels included). Uses Guidelime Pathfinder's dots and Questie's WoW: Forever database.
 ## Author: lil bub
-## Version: 1.0.0
+## Version: 1.1.0
 ## Dependencies: Guidelime_Pathfinder, Questie
 ## OptionalDeps: WaypointTracker
 ## SavedVariables: PathyDB
