@@ -27,7 +27,7 @@ local DEFAULTS = {
 	dots = false, dotSize = 0.6, dotAlpha = 1, dotColour = { 0.8, 0.8, 0.8 }, dotSpacing = 4, dotRange = 60, arrowAhead = 40, windowAlpha = 0.92, uiScale = 1,
 	smooth = 60, minimapButton = true, minimapTrail = false,
 	usePin = true, estimate = true, camPitch = 9, followTracked = true,
-	recordWalk = true, useWalked = true,
+	recordWalk = true, useWalked = true, recordOthers = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
@@ -738,47 +738,219 @@ end
 -- straight), and also when it has one, if the way you have walked is not much longer: you know it walks.
 local Walked = {}
 do
-local CELL, OFF, ROW = 6, 4096, 8192
+local CELL, OFF, ROW = 1, 20000, 40000 -- yards per remembered spot; cell numbers are offset to stay positive
+local TILE = 128 -- cells per saved tile
 local LINK_MAX = 45 -- yards: a bigger jump (a teleport, a loading screen) is not a walked link
-local SNAP_START, SNAP_GOAL = 25, 30 -- yards from a remembered spot you and the goal may be
-local MAX_NODES = 60000
-local TICK = 0.4
-local floor, abs, max, min = math.floor, math.abs, math.max, math.min
+local SNAP_START, SNAP_GOAL = 6, 20 -- yards from a walked line you may be; from a walked spot the goal should be
+local OFFWALK = 2 -- ground nobody has walked counts this many times its length against a route
+local TICK = 0.15 -- seconds: running is about 7 yd/s, so a spot about every yard
+local SAVE_EVERY = 20 -- seconds between packing the changed tiles for the save file
+local floor, max, min = math.floor, math.max, math.min
+local byte, concat = string.byte, table.concat
 
-local function store(instance, create)
-	local w = PathyDB.walk
-	if not w then
-		if not create then return end
-		w = {}
-		PathyDB.walk = w
-	end
-	local t = w[instance]
-	if not t and create then t = {}; w[instance] = t end
-	return t
+-- Storage ------------------------------------------------------------------------------------------------
+-- In memory: nodes[continent][cell] = { neighbouring cell, ... } (a spot is the middle of its 1-yard cell).
+-- On disk, in PathyDB.walk2[continent][tile]: one packed text per 128 x 128 yard tile, so the save file holds a
+-- few thousand strings however many spots there are (a table per spot would pass the 262,144 constants one
+-- script may have, and the game would then not load the whole file). A record is 6 characters for the cell,
+-- 1 for how many links go to a higher cell, and 3 for each of those links (their offset). No limit on spots.
+local ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local CH, DEC = {}, {}
+for i = 1, 64 do
+	local c = ALPHA:sub(i, i)
+	CH[i - 1] = c
+	DEC[byte(c)] = i - 1
+end
+local function enc6(n)
+	local f = n % 64; n = floor(n / 64)
+	local e = n % 64; n = floor(n / 64)
+	local d = n % 64; n = floor(n / 64)
+	local c = n % 64; n = floor(n / 64)
+	local b = n % 64; n = floor(n / 64)
+	return CH[n % 64] .. CH[b] .. CH[c] .. CH[d] .. CH[e] .. CH[f]
+end
+local function enc3(n)
+	local c = n % 64; n = floor(n / 64)
+	local b = n % 64; n = floor(n / 64)
+	return CH[n % 64] .. CH[b] .. CH[c]
+end
+local function dec(s, i, w)
+	local n = 0
+	for j = i, i + w - 1 do n = n * 64 + DEC[byte(s, j)] end
+	return n
 end
 
 local function keyOf(x, y) return (floor(x / CELL) + OFF) * ROW + floor(y / CELL) + OFF end
-local function r1(v) return floor(v * 10 + 0.5) / 10 end
+local function posOf(k) return (floor(k / ROW) - OFF + 0.5) * CELL, (k % ROW - OFF + 0.5) * CELL end
+local function tileOf(k) return floor(floor(k / ROW) / TILE) * 1000 + floor((k % ROW) / TILE) end
 
-local total
-local function count()
-	total = 0
-	for _, t in pairs(PathyDB.walk or {}) do
-		for _ in pairs(t) do total = total + 1 end
+local nodes, tiles, dirty = {}, {}, {} -- per continent
+local anyDirty, total = false, 0
+local loader, loaded, loadFailed, legacy
+local lastSave = 0
+local last = { t = 0 }
+local st = { at = -10 }
+local job -- the search under way
+
+local function nodesFor(inst)
+	local t = nodes[inst]
+	if not t then
+		t = {}
+		nodes[inst], tiles[inst], dirty[inst] = t, {}, {}
 	end
+	return t
 end
 
--- Recording ----------------------------------------------------------------------------------------------
-local last = { t = 0 }
-local full
+local function addNode(inst, k)
+	local t = nodesFor(inst)
+	local n = t[k]
+	if n then return n end
+	n = {}
+	t[k] = n
+	local id = tileOf(k)
+	local set = tiles[inst][id]
+	if not set then set = {}; tiles[inst][id] = set end
+	set[k] = true
+	total = total + 1
+	return n, true
+end
 
-local function link(nodes, a, b)
-	local na, nb = nodes[a], nodes[b]
-	for i = 3, #na do
+local function markDirty(inst, k)
+	dirty[inst][tileOf(k)] = true
+	anyDirty = true
+end
+
+local function link(inst, a, b, quiet)
+	local t = nodes[inst]
+	local na, nb = t[a], t[b]
+	for i = 1, #na do
 		if na[i] == b then return end
 	end
 	na[#na + 1] = b
 	nb[#nb + 1] = a
+	if not quiet then markDirty(inst, min(a, b)) end -- a link is saved with its lower spot's tile
+end
+
+local function packTile(inst, id)
+	local t, set = nodes[inst], tiles[inst][id]
+	local out, n = {}, 0
+	for k in pairs(set) do
+		local cx, cy = floor(k / ROW), k % ROW
+		local up, nb = {}, t[k]
+		for i = 1, #nb do
+			local o = nb[i]
+			if o > k and #up < 63 then
+				local dx, dy = floor(o / ROW) - cx, o % ROW - cy
+				if dx >= -63 and dx <= 63 and dy >= -63 and dy <= 63 then up[#up + 1] = enc3((dx + 64) * 128 + (dy + 64)) end
+			end
+		end
+		n = n + 1
+		out[n] = enc6(k) .. CH[#up] .. concat(up)
+	end
+	return concat(out)
+end
+
+-- Packs the changed tiles into PathyDB (what the game writes at a reload or logout); true when none are left
+local function saveSome(budgetMs)
+	local t0 = debugprofilestop()
+	local w = PathyDB.walk2
+	if not w then w = {}; PathyDB.walk2 = w end
+	for inst, ds in pairs(dirty) do
+		for id in pairs(ds) do
+			local si = w[inst]
+			if not si then si = {}; w[inst] = si end
+			local set = tiles[inst][id]
+			si[id] = set and next(set) and packTile(inst, id) or nil
+			ds[id] = nil
+			if budgetMs and debugprofilestop() - t0 > budgetMs then return false end
+		end
+	end
+	anyDirty = false
+	if legacy and PathyDB.walk then PathyDB.walk = nil end -- the older format, now saved in the new one
+	return true
+end
+
+-- Reading what is saved: the older format first (converted), then the packed tiles. A few thousand records a
+-- step, so a lot of saved spots do not freeze the game at login.
+local function loadAll()
+	local count = 0
+	local old = PathyDB.walk
+	if old then
+		legacy = true
+		for inst, t in pairs(old) do
+			local map = {}
+			for k, nd in pairs(t) do
+				local nk = keyOf(nd[1], nd[2])
+				map[k] = nk
+				addNode(inst, nk)
+				markDirty(inst, nk)
+				count = count + 1
+				if count % 3000 == 0 then coroutine.yield() end
+			end
+			for k, nd in pairs(t) do
+				local a = map[k]
+				for i = 3, #nd do
+					local b = map[nd[i]]
+					if b and b ~= a then link(inst, a, b) end
+				end
+				count = count + 1
+				if count % 3000 == 0 then coroutine.yield() end
+			end
+		end
+	end
+	local w = PathyDB.walk2
+	if w then
+		for inst, tl in pairs(w) do
+			for _, s in pairs(tl) do
+				local i, len = 1, #s
+				while i <= len do
+					local k, c = dec(s, i, 6), dec(s, i + 6, 1)
+					i = i + 7
+					addNode(inst, k)
+					local cx, cy = floor(k / ROW), k % ROW
+					for _ = 1, c do
+						local code = dec(s, i, 3)
+						i = i + 3
+						local o = (cx + floor(code / 128) - 64) * ROW + cy + code % 128 - 64
+						addNode(inst, o)
+						link(inst, k, o, true)
+					end
+					count = count + 1
+					if count % 3000 == 0 then coroutine.yield() end
+				end
+			end
+		end
+	end
+end
+
+local function failed(err)
+	loader, loadFailed = nil, true
+	Print("|cffff4040could not read the saved walked spots (" .. tostring(err) .. "): they stay as they are on disk, and nothing new is saved this session|r")
+end
+
+local function stepLoad()
+	local t0 = debugprofilestop()
+	while loader do
+		local ok, err = coroutine.resume(loader)
+		if not ok then return failed(err) end
+		if coroutine.status(loader) == "dead" then
+			loader, loaded = nil, true
+			return
+		end
+		if debugprofilestop() - t0 > 5 then return end
+	end
+end
+
+-- Recording ----------------------------------------------------------------------------------------------
+-- one step of someone's walk (l holds their last spot): the spot, joined to the one before it
+local function feed(l, px, py, instance, now)
+	local key = keyOf(px, py)
+	if l.key == key and l.instance == instance then l.t = now return end
+	local jumped = not l.key or l.instance ~= instance or now - l.t > 5 or dist(px, py, l.x, l.y) > LINK_MAX
+	local _, new = addNode(instance, key)
+	if new then markDirty(instance, key) end
+	if not jumped then link(instance, l.key, key) end
+	l.key, l.instance, l.x, l.y, l.t = key, instance, px, py, now
 end
 
 local function record(now)
@@ -790,46 +962,105 @@ local function record(now)
 	end
 	local px, py, instance = HBD():GetPlayerWorldPosition()
 	if not px or not instance then last.key = nil return end
-	local key = keyOf(px, py)
-	if last.key == key and last.instance == instance then last.t = now return end
-	if not total then count() end
-	local nodes = store(instance, true)
-	local jumped = not last.key or last.instance ~= instance or now - last.t > 5 or dist(px, py, last.x, last.y) > LINK_MAX
-	if not nodes[key] then
-		if total >= MAX_NODES then
-			if not full then full = true; Print("the walked-path memory is full (" .. MAX_NODES .. " spots): /pathy walked clear starts it over") end
-			last.key = nil
-			return
-		end
-		nodes[key] = { r1(px), r1(py) }
-		total = total + 1
-	end
-	if not jumped then link(nodes, last.key, key) end
-	last.key, last.instance, last.x, last.y, last.t = key, instance, px, py, now
+	feed(last, px, py, instance, now)
 end
 
+-- Other players: only where they are, never who. The game gives a position only for your own group (party or
+-- raid); strangers' positions are not available to addons. What is kept per member (just to join one step to the
+-- next) is thrown away at once when the group changes and never saved: no name, no id, only the spots.
+local others = {}
+local function recordOthers(now)
+	if not cfg("recordOthers") then return end
+	local raid = IsInRaid and IsInRaid()
+	local n = raid and GetNumGroupMembers() or (GetNumSubgroupMembers and GetNumSubgroupMembers()) or 0
+	for i = 1, n do
+		local unit = (raid and "raid" or "party") .. i
+		local o = others[unit]
+		if not o then o = {}; others[unit] = o end
+		if UnitExists(unit) and not UnitIsUnit(unit, "player") and UnitIsPlayer(unit) and UnitIsConnected(unit)
+			and not UnitIsDeadOrGhost(unit) and not UnitOnTaxi(unit) and not (UnitInVehicle and UnitInVehicle(unit)) then
+			local x, y, inst = unitWorldPos(unit)
+			if x and inst then feed(o, x, y, inst, now) else o.key = nil end
+		else
+			o.key = nil
+		end
+	end
+end
+
+local roster = CreateFrame("Frame")
+roster:RegisterEvent("GROUP_ROSTER_UPDATE")
+roster:SetScript("OnEvent", function() others = {} end) -- a slot may hold someone else now: no joining across
+
 -- Routes -------------------------------------------------------------------------------------------------
-local function nearest(nodes, x, y, maxD)
-	local r = math.ceil(maxD / CELL)
+-- every remembered spot within maxD yards: { { cell, distance }, ... }
+local function around(t, x, y, maxD)
+	local r = math.ceil(maxD / CELL) + 1
 	local cx, cy = floor(x / CELL) + OFF, floor(y / CELL) + OFF
-	local best, bd = nil, maxD
+	local out = {}
 	for dx = -r, r do
+		local base = (cx + dx) * ROW + cy
 		for dy = -r, r do
-			local k = (cx + dx) * ROW + cy + dy
-			local n = nodes[k]
-			if n then
-				local d = dist(x, y, n[1], n[2])
-				if d <= bd then best, bd = k, d end
+			local k = base + dy
+			if t[k] then
+				local nx, ny = posOf(k)
+				local d = dist(x, y, nx, ny)
+				if d <= maxD then out[#out + 1] = { k, d } end
 			end
 		end
 	end
-	return best
+	return out
 end
 
--- A*: the remembered spots from a to b, or nil
-local function search(nodes, a, b)
-	local gx, gy = nodes[b][1], nodes[b][2]
-	local g, from, closed = { [a] = 0 }, {}, {}
+local function nearest(t, x, y, maxD)
+	local best, bd
+	for _, s in ipairs(around(t, x, y, maxD)) do
+		if not bd or s[2] < bd then best, bd = s[1], s[2] end
+	end
+	return best, bd
+end
+
+-- Where you could step onto the walked lines: the closest point of every walked line (and every spot) within
+-- maxD yards of you. Each is { spot to go on to, yards to get there (via that point), the point's x, y }. Stepping
+-- sideways onto a line you have walked (a few yards) is fine; jumping to a spot further off may cross a wall.
+local function startsFor(t, x, y, maxD)
+	local out, at = {}, {}
+	local function add(k, cost, qx, qy)
+		local i = at[k]
+		if not i then
+			out[#out + 1] = { k, cost, qx, qy }
+			at[k] = #out
+		elseif cost < out[i][2] then
+			out[i] = { k, cost, qx, qy }
+		end
+	end
+	for _, s in ipairs(around(t, x, y, LINK_MAX + maxD)) do
+		local u = s[1]
+		local ux, uy = posOf(u)
+		if s[2] <= maxD then add(u, s[2], ux, uy) end
+		local nu = t[u]
+		for i = 1, #nu do
+			local v = nu[i]
+			local vx, vy = posOf(v)
+			local dx, dy = vx - ux, vy - uy
+			local len2 = dx * dx + dy * dy
+			local f = len2 > 1e-9 and max(0, min(1, ((x - ux) * dx + (y - uy) * dy) / len2)) or 0
+			local qx, qy = ux + dx * f, uy + dy * f
+			local d = dist(x, y, qx, qy)
+			if d <= maxD then
+				add(u, d + dist(qx, qy, ux, uy), qx, qy)
+				add(v, d + dist(qx, qy, vx, vy), qx, qy)
+			end
+		end
+	end
+	return out
+end
+
+-- A* over the walked lines from the places you can step onto them. Any spot may be where the walking ends: the
+-- rest of the way to the goal counts OFFWALK times its length, so the route follows your lines as far as that
+-- pays and goes straight only for what nobody has walked. Returns the spots, and the start's
+-- { spot, cost, x, y } (the point on the line you step onto).
+local function search(t, starts, gx, gy)
+	local g, from, closed, startAt = {}, {}, {}, {}
 	local hf, hk, hn = {}, {}, 0
 	local function push(f, k)
 		hn = hn + 1
@@ -843,7 +1074,7 @@ local function search(nodes, a, b)
 		hf[i], hk[i] = f, k
 	end
 	local function pop()
-		local k = hk[1]
+		local f, k = hf[1], hk[1]
 		local lf, lk = hf[hn], hk[hn]
 		hf[hn], hk[hn] = nil, nil
 		hn = hn - 1
@@ -859,39 +1090,49 @@ local function search(nodes, a, b)
 			end
 			hf[i], hk[i] = lf, lk
 		end
-		return k
+		return f, k
 	end
-	push(0, a)
-	local expanded = 0
+	for _, s in ipairs(starts) do
+		local k, d = s[1], s[2]
+		startAt[k] = s
+		g[k] = d
+		local x, y = posOf(k)
+		push(d + dist(x, y, gx, gy), k)
+	end
+	local best, bestNode, expanded = nil, nil, 0
 	while hn > 0 do
-		local u = pop()
-		if u == b then
-			local path, n, k = {}, 0, b
-			while k do n = n + 1; path[n] = k; k = from[k] end
-			for i = 1, floor(n / 2) do path[i], path[n + 1 - i] = path[n + 1 - i], path[i] end
-			return path
-		end
+		local f, u = pop()
+		if best and f >= best then break end
 		if not closed[u] then
 			closed[u] = true
 			expanded = expanded + 1
-			if expanded > 30000 then return nil end
-			local nu = nodes[u]
-			for i = 3, #nu do
+			if expanded % 500 == 0 then coroutine.yield() end -- the caller carries on over the next frames
+			if expanded > 400000 then break end -- the best so far is used
+			local ux, uy = posOf(u)
+			local whole = g[u] + OFFWALK * dist(ux, uy, gx, gy)
+			if not best or whole < best then best, bestNode = whole, u end
+			local nu = t[u]
+			for i = 1, #nu do
 				local v = nu[i]
-				local nv = nodes[v]
-				if nv and not closed[v] then
-					local ng = g[u] + dist(nu[1], nu[2], nv[1], nv[2])
+				if t[v] and not closed[v] then
+					local vx, vy = posOf(v)
+					local ng = g[u] + dist(ux, uy, vx, vy)
 					if not g[v] or ng < g[v] then
 						g[v], from[v] = ng, u
-						push(ng + dist(nv[1], nv[2], gx, gy), v)
+						push(ng + dist(vx, vy, gx, gy), v)
 					end
 				end
 			end
 		end
 	end
+	if not bestNode then return nil end
+	local path, n, k = {}, 0, bestNode
+	while k do n = n + 1; path[n] = k; k = from[k] end
+	for i = 1, floor(n / 2) do path[i], path[n + 1 - i] = path[n + 1 - i], path[i] end
+	return path, startAt[path[1]]
 end
 
--- Douglas-Peucker: the corners that matter, never more than tol yards off the walked line
+-- Douglas-Peucker: drops only corners within tol yards of the line between their neighbours
 local function simplify(xs, ys, tol)
 	local n = #xs
 	local keep = { [1] = true, [n] = true }
@@ -908,8 +1149,8 @@ local function simplify(xs, ys, tol)
 			if len2 < 1e-9 then
 				d = dist(xs[k], ys[k], ax, ay)
 			else
-				local t = max(0, min(1, ((xs[k] - ax) * dx + (ys[k] - ay) * dy) / len2))
-				d = dist(xs[k], ys[k], ax + dx * t, ay + dy * t)
+				local f = max(0, min(1, ((xs[k] - ax) * dx + (ys[k] - ay) * dy) / len2))
+				d = dist(xs[k], ys[k], ax + dx * f, ay + dy * f)
 			end
 			if d > bestD then bestD, bestK = d, k end
 		end
@@ -926,106 +1167,304 @@ local function simplify(xs, ys, tol)
 	return ox, oy
 end
 
-local st = { at = -10 }
+-- Straight lines are questioned. One is possible, but in a city (buildings, walls, stairs) it is unlikely, so a
+-- straight route there is never trusted just because it is perfect.
+local CITY_MAPS = { [1453] = true, [1455] = true, [1458] = true, [1454] = true, [1456] = true, [1457] = true }
+local cityAt, cityIs = -10, false
+local function inCity()
+	local now = GetTime()
+	if now - cityAt < 2 then return cityIs end
+	cityAt, cityIs = now, false
+	local m, guard = C_Map.GetBestMapForUnit("player"), 0
+	while m and m > 0 and guard < 8 do
+		if CITY_MAPS[m] then cityIs = true break end
+		local info = C_Map.GetMapInfo(m)
+		m, guard = info and info.parentMapID, guard + 1
+	end
+	if not cityIs and IsResting and IsResting() then cityIs = true end
+	return cityIs
+end
+
+-- A route that is a straight line, or a walkable route that is (almost) one: within 3% of the straight distance
+-- (10% in a city), for targets more than 15 yards away
+local function nearStraight(p, px, py, d)
+	if not p or p.walked then return false end
+	if not p.graph then return true end
+	local straight = dist(px, py, d.x, d.y)
+	return straight > 15 and p.remaining ~= nil and p.remaining <= straight * (inCity() and 1.10 or 1.03) + 3
+end
+
+-- The search is done: use its route, or say why not
+local function finish(j, ids, first)
+	local p, d, px, py = PF.path, j.d, j.px, j.py
+	if not target or st.key ~= j.key then return end -- the goal changed meanwhile
+	local own = p and p == st.path
+	if not ids then
+		st.rejected = p
+		st.why = "no walked line to follow from where you stand"
+		return
+	end
+	local xs, ys = { px }, { py }
+	if first and dist(px, py, first[3], first[4]) > 1 then xs[2], ys[2] = first[3], first[4] end -- step onto the line
+	for _, k in ipairs(ids) do
+		local x, y = posOf(k)
+		xs[#xs + 1], ys[#ys + 1] = x, y
+	end
+	local tail = dist(xs[#xs], ys[#ys], d.x, d.y) -- the straight part at the end: ground nobody has walked
+	xs[#xs + 1], ys[#ys + 1] = d.x, d.y
+	xs, ys = simplify(xs, ys, 0.5) -- every real bend stays: the route is as granular as your walking was
+	local L = 0
+	for i = 2, #xs do L = L + dist(xs[i - 1], ys[i - 1], xs[i], ys[i]) end
+	local straight = dist(px, py, d.x, d.y)
+	-- the route already on screen is only replaced by a clearly shorter one (or when you have strayed from it)
+	if own and (p.off or 0) < 15 and L > (p.remaining or math.huge) - 8 then st.why = "keeping the walked route in use" return end
+	local use
+	if p and p.graph then
+		-- Pathfinder has a real route: walked beats it only when about as short and it ends where you have walked.
+		-- A near-perfect straight one in a city is doubted: a longer walked route (that you know walks) wins.
+		if nearStraight(p, px, py, d) and inCity() then
+			use = tail <= SNAP_GOAL and L <= straight * 2.5 + 40
+		else
+			use = tail <= SNAP_GOAL and L <= (p.remaining or math.huge) * 1.25
+		end
+	else
+		-- a straight line says nothing: take the walked route when it gets you clearly nearer, without absurd detours
+		use = L - tail > 10 and tail < straight - 10 and L <= straight * 3 + 60
+	end
+	if not use then
+		st.rejected = p
+		st.why = format("walked route of %d yd, then %d yd of ground nobody has walked, is no better than %s", L - tail, tail,
+			p and p.graph and format("Pathfinder's %d yd", p.remaining or 0) or "the straight line")
+		return
+	end
+	PF.SetPath({ x = xs, y = ys, n = #xs, walked = true, tail = tail }, false)
+	st.path = PF.path
+	st.why = tail > SNAP_GOAL and format("using %d yd of your walked route, then %d yd straight (nothing walked near the destination)", L - tail, tail)
+		or format("using your walked route (%d yd)", L)
+end
+
+-- A few milliseconds of the search each frame
+local function step()
+	if not job then return end
+	local t0 = debugprofilestop()
+	while true do
+		local ok, a, b = coroutine.resume(job.co)
+		if not ok then
+			job = nil
+			error(a)
+		end
+		if coroutine.status(job.co) == "dead" then
+			local j = job
+			job = nil
+			return finish(j, a, b)
+		end
+		if debugprofilestop() - t0 > 4 then return end
+	end
+end
 
 local function consider(now)
-	if not target or not cfg("useWalked") then return end
+	if job or not target or not cfg("useWalked") then return end
+	if not loaded then st.why = "still reading the saved walked spots" return end
 	if PF.riding or PF.flying or PF.service or not PF.dest or not PF.player or not PF.player.x then return end
 	local px, py, instance = HBD():GetPlayerWorldPosition()
 	local d = PF.dest
 	if not px or d.instance ~= instance then return end
 	local p = PF.path
 	local key = instance .. ":" .. floor(d.x) .. ":" .. floor(d.y)
-	if p and p == st.path and st.key == key and (p.off or 0) < 15 then return end -- on the walked route
+	-- on the walked route: looked at again every few seconds as you move, in case you have come level with a
+	-- later part of it (cutting the corner beats walking to the next spot and back)
+	local own = p and p == st.path and st.key == key
+	if own and (p.off or 0) < 15 and (now - st.at < 3 or dist(px, py, st.ox, st.oy) < 6) then return end
 	if p and p == st.rejected and st.key == key and now - st.at < 8 and dist(px, py, st.ox, st.oy) < 15 then return end
 	if now - st.at < 1 then return end
 	st.at, st.key, st.ox, st.oy, st.rejected = now, key, px, py, nil
-	local nodes = store(instance)
-	if not nodes then return end
-	local a, b = nearest(nodes, px, py, SNAP_START), nearest(nodes, d.x, d.y, SNAP_GOAL)
-	local ids = a and b and (a == b and { a } or search(nodes, a, b))
-	if not ids then
+	local t = nodes[instance]
+	if not t then st.why = "nothing remembered on this continent yet" st.rejected = p return end
+	local starts = startsFor(t, px, py, SNAP_START)
+	if #starts == 0 then
 		st.rejected = p
-		st.why = not a and "no remembered spot within " .. SNAP_START .. " yd of you"
-			or not b and "no remembered spot within " .. SNAP_GOAL .. " yd of the destination"
-			or "the spots near you and the ones near the destination are not joined by a walked line"
+		st.why = "you are more than " .. SNAP_START .. " yd from any line you have walked"
 		return
 	end
-	local xs, ys = { px }, { py }
-	for _, k in ipairs(ids) do xs[#xs + 1], ys[#ys + 1] = nodes[k][1], nodes[k][2] end
-	xs[#xs + 1], ys[#ys + 1] = d.x, d.y
-	xs, ys = simplify(xs, ys, 3)
-	local L = 0
-	for i = 2, #xs do L = L + dist(xs[i - 1], ys[i - 1], xs[i], ys[i]) end
-	local use
-	if p and p.graph then
-		use = L <= (p.remaining or math.huge) * 1.25 -- walked beats computed when it is about as short
-	else
-		use = L <= dist(px, py, d.x, d.y) * 3 + 60 -- a straight line says nothing, but no absurd detours
-	end
-	if not use then
-		st.rejected = p
-		st.why = format("your walked route is %d yd, too long next to %s", L, p and p.graph and format("Pathfinder's %d yd", p.remaining or 0) or "the straight line")
+	local gx, gy = d.x, d.y
+	st.why = "searching..."
+	job = {
+		co = coroutine.create(function() return search(t, starts, gx, gy) end),
+		key = key, d = { x = gx, y = gy }, px = px, py = py,
+	}
+end
+
+-- Why the arrow is not following a real route (nil when it is, or when only a short last stretch is straight)
+function Walked.warning()
+	local p = PF.path
+	if not p then return end
+	if p.walked then
+		if p.tail and p.tail > SNAP_GOAL then
+			return format("following your walked route, then a straight line for the last %d yd (nothing walked there)", p.tail)
+		end
 		return
 	end
-	PF.SetPath({ x = xs, y = ys, n = #xs, walked = true }, false)
-	st.path = PF.path
-	st.why = format("using your walked route (%d yd)", L)
+	if not p.graph then
+		return "couldn't find a walkable path, pointing straight at it" .. (st.why and (" (walked data: " .. st.why .. ")") or "")
+	end
+	-- a walkable route that is a straight line anyway: fine in the open, doubtful in a city
+	local px, py = HBD():GetPlayerWorldPosition()
+	local d = PF.dest
+	if px and d and nearStraight(p, px, py, d) and inCity() then
+		return "this route is a straight line, which is unlikely in a city: it may cut through buildings" .. (st.why and (" (walked data: " .. st.why .. ")") or "")
+	end
 end
 
 -- What /pathy walked says about the current trip
 function Walked.explain()
 	local out = {}
-	local nodes, areas = Walked.stats()
-	out[1] = format("%d spots remembered on %d continents; recording %s, routing %s; last spot saved %s",
-		nodes, areas, cfg("recordWalk") and "on" or "OFF", cfg("useWalked") and "on" or "OFF",
+	local areas = 0
+	for _, t in pairs(nodes) do
+		if next(t) then areas = areas + 1 end
+	end
+	out[1] = format("%d spots remembered on %d continents%s; recording %s, routing %s; last spot saved %s",
+		total, areas, loaded and "" or " so far (still reading the saved ones)", cfg("recordWalk") and "on" or "OFF", cfg("useWalked") and "on" or "OFF",
 		last.key and format("%.0f s ago", GetTime() - last.t) or "never this session (or not moving right now)")
+	if loadFailed then out[#out + 1] = "the saved spots could not be read: nothing new is saved" end
 	if Walked.err then out[#out + 1] = "error: " .. tostring(Walked.err) end
 	if not target then out[#out + 1] = "not guiding anywhere, so nothing to route"; return out end
 	local px, py, instance = HBD():GetPlayerWorldPosition()
 	local d = PF.dest
 	if not px or not d then out[#out + 1] = "no position or no destination yet"; return out end
 	if d.instance ~= instance then out[#out + 1] = "the destination is on another continent"; return out end
-	local mine = store(instance)
+	local mine = nodes[instance]
 	if not mine then out[#out + 1] = "nothing remembered on this continent yet"; return out end
-	local function far(x, y)
-		local k = nearest(mine, x, y, 300)
-		return k and dist(x, y, mine[k][1], mine[k][2])
-	end
-	local a, b = far(px, py), far(d.x, d.y)
-	out[#out + 1] = format("nearest remembered spot to you: %s (needs %d yd or less); to the destination: %s (needs %d yd or less)",
-		a and format("%.0f yd", a) or "over 300 yd", SNAP_START, b and format("%.0f yd", b) or "over 300 yd", SNAP_GOAL)
+	local _, a = nearest(mine, px, py, 150)
+	local _, b = nearest(mine, d.x, d.y, 150)
+	out[#out + 1] = format("nearest remembered spot to you: %s (needs %d yd or less); to the destination: %s (ground further than %d yd from one is crossed in a straight line)",
+		a and format("%.0f yd", a) or "over 150 yd", SNAP_START, b and format("%.0f yd", b) or "over 150 yd", SNAP_GOAL)
 	out[#out + 1] = "last decision: " .. (st.why or "none yet") .. "; route in use: " .. (PF.path and (PF.path.walked and "walked" or PF.path.graph and "Pathfinder's" or "straight line") or "none")
 	return out
+end
+
+local function report(err)
+	if not Walked.err then
+		Walked.err = err
+		Print("|cffff4040walked-path error:|r " .. tostring(err))
+	end
 end
 
 local acc = 0
 local driver = CreateFrame("Frame")
 driver:SetScript("OnUpdate", function(_, dt)
+	if not PathyDB then return end
+	if not loaded and not loader and not loadFailed then loader = coroutine.create(loadAll) end
+	if loader then
+		local ok, err = pcall(stepLoad)
+		if not ok then report(err) end
+	end
+	if job then
+		local ok, err = pcall(step)
+		if not ok then report(err) end
+	end
+	if loaded and anyDirty and GetTime() - lastSave >= SAVE_EVERY then
+		local ok, done = pcall(saveSome, 3)
+		if not ok then report(done) elseif done then lastSave = GetTime() end
+	end
 	acc = acc + dt
-	if acc < TICK or not PathyDB or not HBD() then return end
+	if acc < TICK or not HBD() then return end
 	acc = 0
 	local now = GetTime()
 	local ok, err = pcall(record, now)
+	if ok then ok, err = pcall(recordOthers, now) end
 	if ok then ok, err = pcall(consider, now) end
-	if not ok and not Walked.err then
-		Walked.err = err
-		Print("|cffff4040walked-path error:|r " .. tostring(err))
+	if not ok then report(err) end
+end)
+
+-- Before the game writes the save file (a reload or logout): everything changed goes in
+local flush = CreateFrame("Frame")
+flush:RegisterEvent("PLAYER_LOGOUT")
+flush:SetScript("OnEvent", function()
+	if not PathyDB or loadFailed then return end
+	while loader do -- the saved spots are read first, so what is written has all of them
+		local ok = coroutine.resume(loader)
+		if not ok then loader, loadFailed = nil, true return end
+		if coroutine.status(loader) == "dead" then loader, loaded = nil, true end
 	end
+	if loaded and anyDirty then pcall(saveSome) end
 end)
 
 function Walked.stats()
-	local nodes, areas = 0, 0
-	for _, t in pairs(PathyDB.walk or {}) do
-		areas = areas + 1
-		for _ in pairs(t) do nodes = nodes + 1 end
+	local areas = 0
+	for _, t in pairs(nodes) do
+		if next(t) then areas = areas + 1 end
 	end
-	return nodes, areas
+	return total, areas
+end
+
+-- A small window (draggable) showing the remembered spots within RADIUS yards of you, north up, you in the middle:
+-- gold where a spot is joined to others, red where it stands alone. For checking what has really been recorded.
+local RADIUS, SCALE = 25, 4 -- yards shown, pixels per yard
+local radar
+local function updateRadar(r)
+	local px, py, instance = HBD():GetPlayerWorldPosition()
+	local t = px and nodes[instance]
+	local list = t and around(t, px, py, RADIUS) or {}
+	r.text:SetText(format("walked spots within %d yd: %d%s", RADIUS, #list, px and "" or " (no position here)"))
+	for i, s in ipairs(list) do
+		local dot = r.dots[i]
+		if not dot then
+			dot = r.field:CreateTexture(nil, "ARTWORK")
+			dot:SetSize(2, 2)
+			r.dots[i] = dot
+		end
+		local nx, ny = posOf(s[1])
+		if #t[s[1]] > 0 then dot:SetColorTexture(1, 0.82, 0, 1) else dot:SetColorTexture(1, 0.2, 0.2, 1) end
+		dot:ClearAllPoints()
+		dot:SetPoint("CENTER", r.field, "CENTER", -(nx - px) * SCALE, (ny - py) * SCALE) -- world x runs west
+		dot:Show()
+	end
+	for i = #list + 1, #r.dots do r.dots[i]:Hide() end
+end
+
+function Walked.radarShown() return radar and radar:IsShown() or false end
+
+function Walked.radar()
+	if not radar then
+		local r = CreateFrame("Frame", "PathyWalkedRadar", UIParent, "BackdropTemplate")
+		r:SetSize(RADIUS * 2 * SCALE + 8, RADIUS * 2 * SCALE + 26)
+		r:SetPoint("CENTER", UIParent, "CENTER", 300, 0)
+		r:SetFrameStrata("MEDIUM")
+		r:SetToplevel(true)
+		r:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+		r:SetBackdropColor(0, 0, 0, 0.6)
+		r:SetBackdropBorderColor(1, 1, 1, 0.5)
+		r:SetMovable(true)
+		r:EnableMouse(true)
+		r:RegisterForDrag("LeftButton")
+		r:SetScript("OnDragStart", r.StartMoving)
+		r:SetScript("OnDragStop", r.StopMovingOrSizing)
+		r.text = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		r.text:SetPoint("TOP", 0, -6)
+		r.field = CreateFrame("Frame", nil, r)
+		r.field:SetPoint("TOPLEFT", 4, -22)
+		r.field:SetSize(RADIUS * 2 * SCALE, RADIUS * 2 * SCALE)
+		r.me = r.field:CreateTexture(nil, "OVERLAY")
+		r.me:SetColorTexture(0.3, 1, 0.3, 1)
+		r.me:SetSize(7, 7)
+		r.me:SetPoint("CENTER")
+		r.dots, r.since = {}, 0
+		r:SetScript("OnUpdate", function(self, dt)
+			self.since = self.since + dt
+			if self.since < 0.3 then return end
+			self.since = 0
+			if PathyDB and HBD() then pcall(updateRadar, self) end
+		end)
+		radar = r
+	end
+	if radar:IsShown() then radar:Hide() else radar:Show() end
+	return radar:IsShown()
 end
 
 function Walked.clear()
-	PathyDB.walk, total, full = nil, 0, nil
-	last.key = nil
+	nodes, tiles, dirty, total, anyDirty = {}, {}, {}, 0, false
+	PathyDB.walk, PathyDB.walk2, PathyDB.walkCell = nil, nil, nil
+	last.key, job = nil, nil
 	st.path, st.rejected, st.key = nil, nil, nil
 end
 end -- walked paths
@@ -1047,8 +1486,9 @@ local function noRouteText()
 		return "no walking route from here yet"
 	end
 	-- a route exists but it is only the straight line: the walk graph found no way there (or has no data here)
+	local warn = Walked.warning()
+	if warn then return warn end
 	if PF.path.walked then return "following a route you have walked before" end
-	if not PF.path.graph then return "couldn't find a walkable path: pointing straight at it" end
 end
 
 -- The window. Its own block, so its many locals end with it (Lua allows 200 per file); f and allEntries are
@@ -1118,6 +1558,25 @@ title:SetText("Pathy")
 
 local close = CreateFrame("Button", nil, content, "UIPanelCloseButton")
 close:SetPoint("TOPRIGHT", -2, -2)
+
+-- The debug view: a clickable icon in the header that shows or hides the walked-spots window
+local debugBtn = CreateFrame("Button", nil, content)
+debugBtn:SetSize(20, 20)
+debugBtn:SetPoint("TOPRIGHT", -36, -8)
+debugBtn.icon = debugBtn:CreateTexture(nil, "ARTWORK")
+debugBtn.icon:SetAllPoints()
+debugBtn.icon:SetTexture("Interface\\Icons\\INV_Misc_Spyglass_02")
+debugBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+local function paintDebug() debugBtn.icon:SetAlpha(Walked.radarShown() and 1 or 0.45) end
+debugBtn:SetScript("OnClick", function() Walked.radar(); paintDebug() end)
+debugBtn:SetScript("OnEnter", function(self)
+	GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+	GameTooltip:SetText("Debug view")
+	GameTooltip:AddLine("Shows or hides the spots you have walked near you", 1, 1, 1, true)
+	GameTooltip:Show()
+end)
+debugBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+paintDebug()
 
 local status = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 status:SetPoint("TOPLEFT", 14, -36)
@@ -2522,9 +2981,8 @@ driver:SetScript("OnUpdate", function(_, dt)
 			arrow.climb:SetText("")
 			arrow.dist:SetText("")
 		end
-		if not ride and PF.path and not PF.path.graph and not PF.path.walked then
-			arrow.climb:SetText("|cffff9933Pathy: couldn't find a walkable path, pointing straight at it|r")
-		end
+		local warn = not ride and Walked.warning()
+		if warn then arrow.climb:SetText("|cffff9933Pathy: " .. warn .. "|r") end
 	elseif target and not handle:IsShown() then
 		hideArrowShape()
 		local why = noRouteText() or dbg.reason
@@ -2624,7 +3082,7 @@ end
 local toggleSettings, applied, registerOptionsEntry
 do
 local S = CreateFrame("Frame", "PathySettings", UIParent, "BackdropTemplate")
-S:SetSize(600, 730)
+S:SetSize(600, 770)
 S:SetPoint("CENTER", 0, 40)
 S:SetFrameStrata("MEDIUM")
 S:SetToplevel(true)
@@ -2841,8 +3299,9 @@ slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadie
 header(S, "Walked paths", R, -612)
 checkbox(S, "recordWalk", "Remember where I walk", R, -630)
 checkbox(S, "useWalked", "Use it to route (no path, or shorter than the usual one)", R, -654)
+checkbox(S, "recordOthers", "Also remember where my group members walk (positions only)", R, -678)
 
-button(S, "Reset everything to defaults", 220, 190, -686, function()
+button(S, "Reset everything to defaults", 220, 190, -726, function()
 	for k in pairs(DEFAULTS) do PathyDB[k] = nil end
 	for k in pairs(DEFAULTS) do applied(k) end
 	refreshSettings()
@@ -3164,10 +3623,12 @@ SlashCmdList.PATHY = function(msg)
 			v(dbg.view), v(dbg.cached), v(dbg.unsure), v(dbg.firstZ), v(dbg.offscreen), v(dbg.drawn), v(dbg.sx), v(dbg.sy)))
 		local p = PF.path
 		if p and p.x then Print(format("route: %d corners, %.0f yd left", p.n or 0, p.remaining or 0)) end
-	elseif lower == "walked" or lower == "walked clear" then
+	elseif lower == "walked" or lower == "walked clear" or lower == "walked show" then
 		if lower == "walked clear" then
 			Walked.clear()
 			Print("forgot every place you had walked")
+		elseif lower == "walked show" then
+			Print("walked-spot window " .. onOff(Walked.radar()) .. ": the spots remembered within 25 yd of you, north up and you in the middle (gold: joined to others, red: alone). Drag it to move; |cffffff00/pathy walked show|r again closes it.")
 		else
 			for _, line in ipairs(Walked.explain()) do Print(line) end
 			Print("|cffffff00/pathy walked clear|r forgets everything remembered.")
@@ -3177,7 +3638,7 @@ SlashCmdList.PATHY = function(msg)
 		Print("/pathy pin  - walk to your map pin    /pathy target  - walk to the NPC you have targeted")
 		Print("/pathy <name>  - walk to the first quest or NPC in the list matching that text")
 		Print("/pathy stop  - stop guiding")
-		Print("/pathy walked  - how much of your walking is remembered    /pathy walked clear  - forget it")
+		Print("/pathy walked  - how much of your walking is remembered    /pathy walked show  - see the spots near you    /pathy walked clear  - forget it")
 		Print("/pathy arrow | dots | minimap  - turn the arrow / the ground dots / the minimap button on or off")
 		Print("/pathy config  - settings: the arrow's and dots' size, opacity, colour, position...")
 	else
