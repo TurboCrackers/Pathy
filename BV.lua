@@ -475,8 +475,28 @@ local function route(now)
 	end
 end
 
+-- The planner draws the way as a line on the world map and the minimap (a map-pin source of its own). Pathy has its
+-- own arrow and HUD, so that line is taken away: the source is left registered but given no points (the setting
+-- brings it back)
+local function mapLine(R)
+	local P = R and R.ns and R.ns.MapPins
+	local source = P and P.providers and P.providers["routing:way"]
+	if not source then return end
+	if ns.cfg("showMapLine") then
+		if source.pathyPoints then
+			source.points, source.pathyPoints = source.pathyPoints, nil
+			P:Refresh()
+		end
+	elseif not source.pathyPoints and type(source.points) == "function" then
+		source.pathyPoints = source.points
+		source.points = function() return {} end
+		P:Refresh()
+	end
+end
+
 local function tick(now)
 	route(now)
+	pcall(mapLine, routing())
 	local t = ns.getTarget()
 	local R = routing()
 	local N = R and R.Navigate

@@ -20,7 +20,7 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
 	arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
-	guidePanel = true, silenceBV = true, showLogButton = false,
+	guidePanel = true, silenceBV = true, showLogButton = false, showMapLine = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
 	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, hudLocked = false, uiScale = 1, minimapButton = true, followTracked = true,
 }
@@ -2026,6 +2026,7 @@ local function buildSettings(content)
 
 	local g = section("General")
 	g.check("minimapButton", "Pathy button on the minimap")
+	g.check("showMapLine", "Show the route planner's line on the world map and the minimap")
 	g.check("followTracked", "Guide to the quest I focus in Questie's tracker")
 	g.slider("arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", 1, 120, 1, "%d yd")
 	g.buttons({ "Reset everything to defaults", 220, function()
