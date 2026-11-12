@@ -22,7 +22,7 @@ local DEFAULTS = {
 	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
 	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false, simpleUI = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
-	windowAlpha = 0.92, uiScale = 1, minimapButton = true, followTracked = true,
+	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, uiScale = 1, minimapButton = true, followTracked = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
@@ -544,8 +544,9 @@ content:SetPoint("TOPLEFT")
 content:SetPoint("BOTTOMRIGHT")
 -- the look the settings and saved size give it (background opacity, size)
 function f.ApplyLook()
-	f:SetBackdropColor(0.05, 0.05, 0.08, cfg("windowAlpha"))
-	f:SetBackdropBorderColor(1, 1, 1, cfg("windowAlpha"))
+	local bg, edge = cfg("windowColour"), cfg("windowBorder")
+	f:SetBackdropColor(bg[1], bg[2], bg[3], cfg("windowAlpha"))
+	f:SetBackdropBorderColor(edge[1], edge[2], edge[3], cfg("windowAlpha"))
 	content:SetScale(cfg("uiScale"))
 	if f.Relayout then f.Relayout() end
 	local size = PathyDB and PathyDB.size
@@ -1788,7 +1789,7 @@ end
 local toggleSettings, applied, registerOptionsEntry
 do
 local S = CreateFrame("Frame", "PathySettings", UIParent, "BackdropTemplate")
-S:SetSize(600, 730)
+S:SetSize(600, 600)
 S:SetPoint("CENTER", 0, 40)
 S:SetFrameStrata("MEDIUM")
 S:SetToplevel(true)
@@ -1820,7 +1821,7 @@ onArrowMoved = refreshSettings
 -- a setting changed: things that need more than being read next frame
 function applied(key)
 	if key == "arrow" then updateArrowShown() end
-	if key == "windowAlpha" or key == "uiScale" then f.ApplyLook() end
+	if key == "windowAlpha" or key == "uiScale" or key == "windowColour" or key == "windowBorder" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
 	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI") and ns.BV then ns.BV.refresh() end
 
@@ -1845,7 +1846,7 @@ local function checkbox(parent, key, label, x, y)
 	cb:SetPoint("TOPLEFT", x, y)
 	local fs = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	fs:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-	fs:SetWidth((x < 300 and 296 or 586) - x - 30) -- wraps inside its column and the window
+	fs:SetWidth(500 - x) -- wraps inside the window
 	fs:SetJustifyH("LEFT")
 	fs:SetWordWrap(true)
 	fs:SetText(label)
@@ -1859,7 +1860,7 @@ local function slider(parent, key, label, x, y, lo, hi, step, fmt, factor)
 	factor = factor or 1
 	local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	fs:SetPoint("TOPLEFT", x, y)
-	fs:SetWidth(250) -- long labels wrap instead of running off the window
+	fs:SetWidth(300) -- long labels wrap instead of running off the window
 	fs:SetJustifyH("LEFT")
 	fs:SetWordWrap(true)
 	local s = CreateFrame("Slider", nil, parent, "BackdropTemplate")
@@ -1939,71 +1940,159 @@ local function button(parent, text, w, x, y, fn)
 	return b
 end
 
--- left column: the arrow
-local L, R = 16, 316
-header(S, "Arrow", L, -42)
-checkbox(S, "arrow", "Show the arrow", L, -60)
-slider(S, "arrowSize", "Size", L + 4, -92, 0.2, 2, 0.05, "%d%%", 100)
-slider(S, "arrowAlpha", "Opacity", L + 4, -132, 0.05, 1, 0.05, "%d%%", 100)
-swatch(S, "arrowColour", "Colour", L + 4, -172)
-checkbox(S, "arrowDirColour", "Colour by direction (green ahead, red behind)", L, -198)
-checkbox(S, "arrowText", "Show up / down and the distance under it", L, -222)
-slider(S, "arrowX", "Across the screen", L + 4, -254, 0, 1, 0.01, "%d%%", 100)
-slider(S, "arrowY", "Up the screen", L + 4, -294, 0, 1, 0.01, "%d%%", 100)
-local unlockBtn
-unlockBtn = button(S, "Drag to move", 130, L + 4, -334, function()
-	setArrowUnlocked(not handle:IsShown())
-	unlockBtn:SetText(handle:IsShown() and "Lock in place" or "Drag to move")
-end)
-button(S, "Reset position", 120, L + 140, -334, function()
-	PathyDB.arrowX, PathyDB.arrowY = nil, nil
-	applied("arrowX")
-	refreshSettings()
-end)
+-- The settings, built the same way into Pathy's own window and into the game's options (Esc > Options > AddOns >
+-- Pathy): a stack of sections, each folded or opened by clicking its title. Both copies share the folded state.
+local unlockBtns = {}
+local function updateUnlock()
+	for _, b in ipairs(unlockBtns) do b:SetText(handle:IsShown() and "Lock in place" or "Drag to move") end
+end
+local painters = {}
+local function repaintSections() for _, p in ipairs(painters) do p() end end
+local HEAD = 24
 
--- right column: the minimap, Questie, the HUD
-header(S, "Minimap", R, -42)
-checkbox(S, "minimapButton", "Pathy button on the minimap", R, -60)
-header(S, "Questie", R, -102)
-checkbox(S, "followTracked", "Guide to the quest I focus in Questie's tracker", R, -120)
-slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", R + 4, -156, 1, 120, 1, "%d yd")
-header(S, "HUD", R, -216)
-checkbox(S, "simpleUI", "Simple path UI: only the arrow, with the instructions under it (no HUD)", R, -234)
-checkbox(S, "guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)", R, -270)
-checkbox(S, "hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)", R, -306)
-checkbox(S, "silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)", R, -342)
-checkbox(S, "showLogButton", "Show the log button on the HUD (what the route planner did for this way)", R, -378)
+local function buildSettings(content)
+	local secs, last = {}, nil
+	local function relayout()
+		local h = 0
+		for _, sec in ipairs(secs) do h = h + sec:GetHeight() end
+		content:SetHeight(h + 10)
+	end
+	local function section(title, foldedByDefault)
+		local sec = CreateFrame("Frame", nil, content)
+		sec:SetWidth(560)
+		if last then sec:SetPoint("TOPLEFT", last, "BOTTOMLEFT", 0, 0) else sec:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0) end
+		last = sec
+		secs[#secs + 1] = sec
+		local head = CreateFrame("Button", nil, sec)
+		head:SetPoint("TOPLEFT", 0, 0)
+		head:SetSize(560, HEAD)
+		local fs = head:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		fs:SetPoint("LEFT", 4, 0)
+		local body = CreateFrame("Frame", nil, sec)
+		body:SetPoint("TOPLEFT", 0, -HEAD)
+		body:SetSize(560, 10)
+		local flow = { y = 4 }
+		local function folded()
+			local t = PathyDB and PathyDB.settingsFolded
+			if t and t[title] ~= nil then return t[title] end
+			return foldedByDefault and true or false
+		end
+		local function paint()
+			local fold = folded()
+			fs:SetText((fold and "[+]  " or "[-]  ") .. title)
+			body:SetShown(not fold)
+			sec:SetHeight(HEAD + (fold and 0 or flow.y + 6))
+			relayout()
+		end
+		head:SetScript("OnClick", function()
+			PathyDB.settingsFolded = PathyDB.settingsFolded or {}
+			PathyDB.settingsFolded[title] = not folded()
+			repaintSections()
+		end)
+		painters[#painters + 1] = paint
+		function flow.check(key, label)
+			checkbox(body, key, label, 16, -flow.y)
+			flow.y = flow.y + (#label > 80 and 40 or 26)
+		end
+		function flow.slider(key, label, lo, hi, step, fmt, factor)
+			slider(body, key, label, 20, -flow.y, lo, hi, step, fmt, factor)
+			flow.y = flow.y + 28 + 12 * math.ceil((#label + 8) / 50)
+		end
+		function flow.swatch(key, label)
+			swatch(body, key, label, 20, -flow.y)
+			flow.y = flow.y + 30
+		end
+		function flow.buttons(...)
+			local x = 20
+			for _, b in ipairs({ ... }) do
+				local btn = button(body, b[1], b[2], x, -flow.y, b[3])
+				if b[4] then b[4](btn) end
+				x = x + b[2] + 10
+			end
+			flow.y = flow.y + 30
+		end
+		return flow
+	end
 
-header(S, "Text under the arrow", L, -372)
-slider(S, "textAlpha", "Opacity", L + 4, -392, 0.05, 1, 0.05, "%d%%", 100)
-swatch(S, "textColour", "Colour", L + 4, -432)
-slider(S, "textX", "Across the screen", L + 4, -464, 0, 1, 0.01, "%d%%", 100)
-slider(S, "textY", "Up the screen", L + 4, -504, 0, 1, 0.01, "%d%%", 100)
-button(S, "Reset text position", 150, L + 4, -544, function()
-	PathyDB.textX, PathyDB.textY = nil, nil
-	refreshSettings()
-end)
+	local g = section("General")
+	g.check("minimapButton", "Pathy button on the minimap")
+	g.check("followTracked", "Guide to the quest I focus in Questie's tracker")
+	g.slider("arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", 1, 120, 1, "%d yd")
+	g.slider("windowAlpha", "Pathy window background opacity", 0, 1, 0.05, "%d%%", 100)
+	g.slider("uiScale", "Pathy window size (UI scale)", 0.5, 1.5, 0.05, "%d%%", 100)
+	g.buttons({ "Reset everything to defaults", 220, function()
+		for k in pairs(DEFAULTS) do PathyDB[k] = nil end
+		for k in pairs(DEFAULTS) do applied(k) end
+		refreshSettings()
+	end })
 
-slider(S, "windowAlpha", "Pathy window background opacity", L + 4, -584, 0, 1, 0.05, "%d%%", 100)
-slider(S, "uiScale", "Pathy window size (UI scale)", L + 4, -624, 0.5, 1.5, 0.05, "%d%%", 100)
+	local c = section("Colour scheme")
+	c.swatch("windowColour", "Pathy window background")
+	c.swatch("windowBorder", "Pathy window border")
+	c.check("hudColourOn", "Use my own colour for the HUD's arrow instead of the theme's")
+	c.swatch("hudColour", "HUD arrow colour")
+	c.buttons({ "Reset colours", 120, function()
+		PathyDB.windowColour, PathyDB.windowBorder, PathyDB.hudColourOn, PathyDB.hudColour = nil, nil, nil, nil
+		applied("windowColour")
+		refreshSettings()
+	end })
 
-button(S, "Reset everything to defaults", 220, 190, -686, function()
-	for k in pairs(DEFAULTS) do PathyDB[k] = nil end
-	for k in pairs(DEFAULTS) do applied(k) end
-	refreshSettings()
-end)
+	local h = section("HUD")
+	h.check("simpleUI", "Simple path UI: only the arrow, with the instructions under it (no HUD)")
+	h.check("guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)")
+	h.check("hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)")
+	h.check("silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)")
+	h.check("showLogButton", "Show the log button on the HUD (what the route planner did for this way)")
+
+	local w = section("Simple Widget Settings", true)
+	w.check("arrow", "Show the arrow")
+	w.slider("arrowSize", "Arrow size", 0.2, 2, 0.05, "%d%%", 100)
+	w.slider("arrowAlpha", "Arrow opacity", 0.05, 1, 0.05, "%d%%", 100)
+	w.swatch("arrowColour", "Arrow colour")
+	w.check("arrowDirColour", "Colour by direction (green ahead, red behind)")
+	w.check("arrowText", "Show up / down and the distance under it")
+	w.slider("arrowX", "Arrow: across the screen", 0, 1, 0.01, "%d%%", 100)
+	w.slider("arrowY", "Arrow: up the screen", 0, 1, 0.01, "%d%%", 100)
+	w.buttons({ "Drag to move", 130, function()
+		setArrowUnlocked(not handle:IsShown())
+		updateUnlock()
+	end, function(b) unlockBtns[#unlockBtns + 1] = b end }, { "Reset position", 120, function()
+		PathyDB.arrowX, PathyDB.arrowY = nil, nil
+		applied("arrowX")
+		refreshSettings()
+	end })
+	w.slider("textAlpha", "Text under the arrow: opacity", 0.05, 1, 0.05, "%d%%", 100)
+	w.swatch("textColour", "Text colour")
+	w.slider("textX", "Text: across the screen", 0, 1, 0.01, "%d%%", 100)
+	w.slider("textY", "Text: up the screen", 0, 1, 0.01, "%d%%", 100)
+	w.buttons({ "Reset text position", 150, function()
+		PathyDB.textX, PathyDB.textY = nil, nil
+		refreshSettings()
+	end })
+
+	refreshers[#refreshers + 1] = repaintSections
+end
+
+-- in Pathy's own window
+local sScroll = CreateFrame("ScrollFrame", "PathySettingsScroll", S, "UIPanelScrollFrameTemplate")
+sScroll:SetPoint("TOPLEFT", 12, -40)
+sScroll:SetPoint("BOTTOMRIGHT", -32, 12)
+local sContent = CreateFrame("Frame", nil, sScroll)
+sContent:SetSize(560, 10)
+sScroll:SetScrollChild(sContent)
+buildSettings(sContent)
 
 S:SetScript("OnShow", refreshSettings)
 S:SetScript("OnHide", function()
 	setArrowUnlocked(false)
-	unlockBtn:SetText("Drag to move")
+	updateUnlock()
 end)
 
 function toggleSettings()
 	if S:IsShown() then S:Hide() else S:Show() end
 end
 
--- An entry in the game's own options (Esc > Options > AddOns > Pathy) that opens the settings window.
+-- the same settings in the game's own options
 function registerOptionsEntry()
 	local panel = CreateFrame("Frame")
 	panel.name = "Pathy"
@@ -2014,18 +2103,19 @@ function registerOptionsEntry()
 	d:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, -8)
 	d:SetPoint("RIGHT", -16, 0)
 	d:SetJustifyH("LEFT")
-	d:SetText("A 3D arrow and a guide window that lead you to quest givers, turn-ins, your map pin or your target along a planned route (walls, stairs, lifts, boats and zeppelins included).\n\n"
-		.. "Pathy's settings are in their own window, so you can see the arrow change while you adjust it. "
-		.. "You can also open it with /pathy config, or by shift-clicking Pathy's minimap button.")
-	local b = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-	b:SetSize(200, 26)
-	b:SetPoint("TOPLEFT", d, "BOTTOMLEFT", 0, -16)
-	b:SetText("Open Pathy settings")
-	b:SetScript("OnClick", function()
-		if SettingsPanel and SettingsPanel:IsShown() then HideUIPanel(SettingsPanel) end
-		if InterfaceOptionsFrame and InterfaceOptionsFrame:IsShown() then HideUIPanel(InterfaceOptionsFrame) end
-		if GameMenuFrame and GameMenuFrame:IsShown() then HideUIPanel(GameMenuFrame) end
-		S:Show()
+	d:SetText("A 3D arrow and a guide window that lead you to quest givers, turn-ins, your map pin or your target along a planned route (walls, stairs, lifts, boats and zeppelins included). "
+		.. "The same settings open in their own window with /pathy config or a shift-click on Pathy's minimap button, where you can see the arrow change while you adjust it.")
+	local scroll = CreateFrame("ScrollFrame", "PathyOptionsScroll", panel, "UIPanelScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", d, "BOTTOMLEFT", 0, -12)
+	scroll:SetPoint("BOTTOMRIGHT", -32, 12)
+	local content = CreateFrame("Frame", nil, scroll)
+	content:SetSize(560, 10)
+	scroll:SetScrollChild(content)
+	buildSettings(content)
+	panel:SetScript("OnShow", refreshSettings)
+	panel:SetScript("OnHide", function()
+		setArrowUnlocked(false)
+		updateUnlock()
 	end)
 	if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
 		Settings.RegisterAddOnCategory(Settings.RegisterCanvasLayoutCategory(panel, "Pathy"))

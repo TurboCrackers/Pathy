@@ -227,6 +227,10 @@ function HUD.arrowSpot()
 		local ok, cr, cg, cb = pcall(style.Color, style, key)
 		if ok and cr then r, g, b = cr, cg, cb end
 	end
+	if ns.cfg("hudColourOn") then
+		local c = ns.cfg("hudColour")
+		r, g, b = c[1], c[2], c[3]
+	end
 	return x * s, y * s, f.medal:GetWidth() * s * 0.9, r, g, b
 end
 
