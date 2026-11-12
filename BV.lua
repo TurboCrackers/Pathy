@@ -285,6 +285,7 @@ local function content(R, N, t)
 		else
 			now = (parts.verb or "Ride") .. " " .. (parts.target or "")
 			target = (R.Timetable and safe(R.Timetable.GuideText, R.Timetable, step)) or "Wait for it here and ride along until you are there."
+			target = target:gsub("%s*Departure time not known yet%.?", "") -- (always what it says for a tram)
 		end
 	else
 		now = parts.verb or "Go"

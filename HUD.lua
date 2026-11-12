@@ -239,6 +239,11 @@ local function build(R)
 				o:SetNow("Riding " .. (parts.target or ""))
 				f.target:SetText("You are on it: stay on until you arrive.")
 			end
+			-- "departure time not known yet" is always what it says for a tram: not shown
+			local say = f.target:GetText()
+			if say and say:find("not known yet", 1, true) then
+				f.target:SetText((say:gsub("%s*Departure time not known yet%.?", "")))
+			end
 			tidy(f, N)
 		end
 	end)
