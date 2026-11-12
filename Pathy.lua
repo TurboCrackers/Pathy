@@ -1,15 +1,12 @@
--- Pathy: pick a quest giver (to start a quest) or a turn-in NPC (to finish one) and get walked there with
--- ground dots along the real walkable route, so a target on another level of a cave is reached by the way
--- down (or up) instead of a straight line through the rock.
+-- Pathy: pick a quest giver (to start a quest) or a turn-in NPC (to finish one) and be led there by a 3D arrow along
+-- the route BV Addon Suite - Routing plans (walls, stairs, lifts, boats and zeppelins included).
 --
--- Pathy finds the NPCs in Questie's WoW: Forever database and hands the target to Guidelime Pathfinder,
--- which owns the walk grid (with cave and building levels), the in-world marker and the ground dots.
--- While guiding, Pathy keeps Pathfinder's minimap trail off and stops WaypointTracker from picking up the
--- map pins Pathfinder moves from corner to corner (it called each corner "You have arrived!" and removed it,
--- which switched the dots off). Guiding only ends when the quest is accepted / turned in, or /pathy stop.
+-- Pathy finds the places in Questie's WoW: Forever database; BV.lua hands them to BV's planner and copies the leg
+-- you are on; this file follows you along it and turns the arrow (drawn in HUD.lua's copy of BV's guide window, or on
+-- the screen). Guiding only ends when the quest is accepted / turned in, or /pathy stop.
+-- Needs Questie and BV Addon Suite (Core, Map Data, Routing). Nothing else.
 
 local ADDON, ns = ...
-local PF = GuidelimePathfinder -- Guidelime Pathfinder's namespace (a required dependency)
 
 local sqrt, floor = math.sqrt, math.floor
 
@@ -22,12 +19,10 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 -- Settings (PathyDB holds only what was changed; /pathy config opens the window)
 local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
-	arrowText = true, arrowX = 0.5, arrowY = 0.31,
+	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
 	guidePanel = true, hideBVGuide = true, silenceBV = true,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
-	dots = false, dotSize = 0.6, dotAlpha = 1, dotColour = { 0.8, 0.8, 0.8 }, dotSpacing = 4, dotRange = 60, arrowAhead = 40, windowAlpha = 0.92, uiScale = 1,
-	smooth = 60, minimapButton = true, minimapTrail = false,
-	usePin = true, estimate = true, camPitch = 9, followTracked = true,
+	windowAlpha = 0.92, uiScale = 1, minimapButton = true, followTracked = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
@@ -35,7 +30,12 @@ local function cfg(key)
 	return v
 end
 
-local function HBD() return PF and PF.HBD end
+-- HereBeDragons, the map library: Questie's own copy (it needs no other addon)
+local hbdLib
+local function HBD()
+	hbdLib = hbdLib or LibStub("HereBeDragonsQuestie-2.0", true) or LibStub("HereBeDragons-2.0", true)
+	return hbdLib
+end
 
 local function dist(ax, ay, bx, by) return sqrt((ax - bx) ^ 2 + (ay - by) ^ 2) end
 
@@ -192,44 +192,34 @@ local function availableQuests(px, py, instance)
 end
 
 ------------------------------------------------------------------------------------------------------------
--- Guiding (through Guidelime Pathfinder)
+-- Guiding
 ------------------------------------------------------------------------------------------------------------
 
--- Other addons' settings Pathy changes while guiding: Pathfinder's minimap trail off (Pathy draws its own),
--- Pathfinder's own ground dots off (Pathy draws its own), and WaypointTracker's "follow map pins" off (it took
--- each of the marker's corners for a new waypoint). The originals are kept in PathyDB.restore, so they come
--- back even after a /reload in the middle of a trip.
-local function quietSettings()
-	local list = {}
-	if PF and PF.db then
-		list[#list + 1] = { "minimap", PF.db, false }
-		list[#list + 1] = { "marker", PF.db, cfg("usePin") } -- the marker is the game's map pin, moved about
-		list[#list + 1] = { "dots", PF.db, false }
-	end
-	local wt = WaypointTrackerDB and WaypointTrackerDB.settings
-	if wt then list[#list + 1] = { "followMapPins", wt, false } end
-	return list
-end
-
-local function setQuiet(on)
-	PathyDB.restore = PathyDB.restore or {}
+-- Earlier versions of Pathy ran on Guidelime Pathfinder and changed some of its settings (the minimap trail, the
+-- marker, the dots) and WaypointTracker's "follow map pins" while guiding, keeping the originals in PathyDB.restore;
+-- and kept your own map pin aside while Pathfinder steered the game's pin. Pathy no longer touches any of that;
+-- what an earlier version left changed is put back once.
+local function restoreOldSettings()
 	local restore = PathyDB.restore
-	for _, s in ipairs(quietSettings()) do
-		local key, db, value = s[1], s[2], s[3]
-		if on then
-			if restore[key] == nil then restore[key] = db[key] == nil and "default" or db[key] end
-			db[key] = value
-		elseif restore[key] ~= nil then
-			if restore[key] == "default" then db[key] = nil else db[key] = restore[key] end
-			restore[key] = nil
+	if type(restore) == "table" then
+		local owners = { minimap = GuidelimePathfinderDB, marker = GuidelimePathfinderDB, dots = GuidelimePathfinderDB,
+			followMapPins = WaypointTrackerDB and WaypointTrackerDB.settings }
+		for key, value in pairs(restore) do
+			local db = owners[key]
+			if db then
+				if value == "default" then db[key] = nil else db[key] = value end
+			end
 		end
 	end
-	if PF and PF.Trail and PF.Trail.Refresh then PF.Trail.Refresh() end
+	local pin = PathyDB.savedPin
+	if pin and not (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then
+		pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(pin[1], pin[2], pin[3]))
+		if pin[4] and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then C_SuperTrack.SetSuperTrackedUserWaypoint(true) end
+	end
+	PathyDB.restore, PathyDB.savedPin = nil, nil
 end
 
--- Your own map pin. Pathfinder steers its in-world marker (which the dots and arrow are lined up with) by
--- moving the game's map pin, so a pin you had is kept aside and put back when guiding ends; a pin you place
--- while guiding is left alone (the dots pause until you remove it; the arrow keeps going).
+-- The map pin you have, if any ( { map, x, y, tracked } )
 local function currentPin()
 	if not (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then return end
 	local wp = C_Map.GetUserWaypoint()
@@ -238,39 +228,12 @@ local function currentPin()
 		C_SuperTrack and C_SuperTrack.IsSuperTrackingUserWaypoint and C_SuperTrack.IsSuperTrackingUserWaypoint() or false }
 end
 
-local function savePlayerPin()
-	if not cfg("usePin") or PathyDB.savedPin then return end
-	if PF.Marker and PF.Marker.IsActive and PF.Marker.IsActive() then return end -- that one is Pathfinder's
-	PathyDB.savedPin = currentPin()
-end
-
-local function restorePlayerPin()
-	local pin = PathyDB.savedPin
-	PathyDB.savedPin = nil
-	if not cfg("usePin") then return end -- Pathy never touched your pin
-	if not pin or (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint() and not (PF.Marker and PF.Marker.IsActive())) then return end
-	pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(pin[1], pin[2], pin[3]))
-	if pin[4] and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then C_SuperTrack.SetSuperTrackedUserWaypoint(true) end
-end
-
-local stopSerial = 0
 local function stop(msg)
 	if not target then return end
 	target = nil
 	PathyDB.target = nil
 	if msg then Print(msg) end
 	if PathyFrame and PathyFrame:IsShown() then PathyFrame.Refresh() end
-	-- once Pathfinder has let go of the marker (it looks ten times a second): your pin back, then the settings
-	-- (WaypointTracker's last, so it does not take your own pin coming back for a new one)
-	stopSerial = stopSerial + 1
-	local serial = stopSerial
-	C_Timer.After(0.4, function()
-		if target or serial ~= stopSerial then return end
-		restorePlayerPin()
-		C_Timer.After(0.3, function()
-			if not target and serial == stopSerial then setQuiet(false) end
-		end)
-	end)
 end
 
 ns.stop = stop -- (for HUD.lua: the HUD's button that ends the way)
@@ -293,21 +256,17 @@ local function goTo(spots, info, chosen)
 	if chosen == nil then return ns.BV.choose(spots, function(p) goTo(spots, info, p) end) end
 	local pick, trip = chosen, nil
 	if not pick then return Print("BV finds no way to any place for that") end
-	if not target then savePlayerPin() end
 	target = {
 		x = pick.x, y = pick.y, instance = pick.instance, z = pick.z, uiMap = pick.uiMap,
 		name = pick.name or info.name or "?", quest = info.quest or "", questId = info.questId, kind = info.kind,
 	}
 	PathyDB.target = info.saved
-	if not PF.db.enabled then PF.db.enabled = true end
-	setQuiet(true)
-	if cfg("usePin") and PF.Marker and PF.Marker.ResetOverride then PF.Marker.ResetOverride() end
 	local zone = pick.uiMap and C_Map.GetMapInfo(pick.uiMap)
 	local eta = trip and trip.cost and (trip.cost < 60 and ", under a minute away" or format(", about %d min away", floor(trip.cost / 60 + 0.5))) or ""
 	Print(format("heading to %s%s%s%s", target.name, info.what and (" (" .. info.what .. ")") or "",
 		zone and zone.name and (" in " .. zone.name) or "", eta))
 	local w = info.walker or walker(info.npcId)
-	if w then Print(w .. " walks a route, so they may be a little way off from where the dots end: look around there") end
+	if w then Print(w .. " walks a route, so they may be a little way off from where the route ends: look around there") end
 	if PathyFrame and PathyFrame:IsShown() then PathyFrame.Refresh() end
 end
 
@@ -434,10 +393,9 @@ end
 
 -- Your map pin (the one you had, if Pathy is already steering the game's pin).
 local function goPin()
-	local pin = (PF.Marker and PF.Marker.IsActive and PF.Marker.IsActive()) and PathyDB.savedPin or currentPin()
+	local pin = currentPin()
 	if not pin then return Print("you have no map pin: Ctrl+click on the world map to place one, then |cffffff00/pathy pin|r") end
 	local x, y, inst = HBD():GetWorldCoordinatesFromZone(pin[2], pin[3], pin[1])
-	if cfg("usePin") then PathyDB.savedPin = pin end -- Pathfinder steers the game pin on the way there; this one comes back after
 	if not x then return Print("can't place that map pin in the world") end
 	goTo({ { x = x, y = y, instance = inst, uiMap = pin[1], name = "your map pin" } },
 		{ kind = "pin", what = nil, saved = { kind = "pin", pin = pin } })
@@ -464,8 +422,6 @@ local function goTargetNpc()
 	goNpc(tonumber(npcId), UnitName("target"))
 end
 
--- Pathfinder asks ns.GetTarget() ten times a second for where to go; while Pathy has a target, it is ours.
--- (Its own /gpath go and corpse runs still win: those are things the player asked for or needs right now.)
 -- There is no "arrived": guiding ends when the quest is accepted / turned in, or /pathy stop.
 -- Group members: the game gives addons their positions (out in the world, not inside dungeons), so Pathy can
 -- walk you to them and follow as they move. Friends outside your group: only their zone is known.
@@ -538,7 +494,6 @@ local function goZone(zoneName, who)
 	Print(format("can't find %s on the map%s", zoneName or "?", who and (": ask " .. who .. " to join your group to be guided to them") or ""))
 end
 
-local pinNoted
 -- Rerouting from where you are: the walking route is planned again every couple of seconds as you move, and at
 -- once when you stray from it; the whole trip (walk, fly, sail...) is looked at again every so often.
 local reroute = { at = 0, trip = 0, x = 0, y = 0, EVERY = 2, OFF = 6, TRIP_EVERY = 10 }
@@ -568,49 +523,6 @@ function reroute.update(px, py)
 	return b.on
 end
 
-local function hookPathfinder()
-	local original = PF.GetTarget
-	PF.GetTarget = function(...)
-		if target and not PF.service and not UnitIsGhost("player") then
-			-- the marker was taken away (the game clears a reached waypoint, another addon removed it): put it
-			-- back. A pin the player placed themselves is theirs: Pathfinder stands back until it is gone.
-			local hasPin = C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()
-			if not cfg("usePin") then
-				-- your pin is never touched
-			elseif not hasPin and PF.Marker and PF.Marker.ResetOverride then
-				PF.Marker.ResetOverride()
-				pinNoted = nil
-			elseif hasPin and not (PF.Marker and PF.Marker.IsActive()) and not pinNoted then
-				pinNoted = true
-				Print("you placed a map pin, so it stays: the dots pause until you remove it (|cffffff00/pathy pin|r goes there instead)")
-			end
-			if target.guid and GetTime() - (target.checked or 0) > 0.2 then
-				target.checked = GetTime()
-				local u = unitByGuid(target.guid)
-				local x, y, inst
-				if u then x, y, inst = unitWorldPos(u) end
-				if x and (inst ~= target.instance or dist(x, y, target.x, target.y) > FOLLOW_MOVE) then
-					target.x, target.y, target.instance, target.z = x, y, inst, nil
-				end
-			end
-			PF.targetSource, PF.checkNote = "pathy", nil
-			return target.x, target.y, target.instance, target.z
-		end
-		return original(...)
-	end
-end
-
--- The game clears a waypoint marker you walk up to ("destination reached"), which would take the marker,
--- and with it the dots, away at the last corner. While Pathy guides, the marker stays.
-local function hookDestinationReached()
-	if not SuperTrackedFrame or not SuperTrackedFrame.OnDestinationReached or SuperTrackedFrame.pathyHooked then return end
-	SuperTrackedFrame.pathyHooked = true
-	local original = SuperTrackedFrame.OnDestinationReached
-	SuperTrackedFrame.OnDestinationReached = function(self, ...)
-		if target and PF.Marker and PF.Marker.IsActive and PF.Marker.IsActive() then return end
-		return original(self, ...)
-	end
-end
 
 ------------------------------------------------------------------------------------------------------------
 -- Window
@@ -1337,65 +1249,24 @@ end)
 end -- the window
 
 ------------------------------------------------------------------------------------------------------------
--- Pathy's own ground dots and 3D arrow, drawn with the game's camera.
+-- Pathy's 3D arrow, and the route it follows.
 --
--- Addons are not told where the camera is, but the game does put one point of ours on screen: Pathfinder's
--- in-world marker. Knowing where that marker is in the world, where the player stands and how far out the
--- camera is zoomed, the camera's turn (yaw) and tilt (pitch) are solved so the marker lands exactly where the
--- game drew it (the same idea Pathfinder's own dots use). On top of that:
---  * the camera is steadied: the game may place the marker a frame behind the player's position, so the fit
---    is tried with this frame's and last frame's position and the one that agrees with the camera so far
---    wins; it is then lightly smoothed (/pathy smooth);
---  * the dots sit at fixed spots along the route (counted back from the route's end, which does not move), so
---    they stay still in the world: the ones you reach fade under your feet, new ones come into range ahead;
---  * the arrow points, in 3D, from the player's feet to the average of the next 8 dots, at the exact angle
---    across and up/down, drawn the way the game camera sees that direction.
+-- The arrow needs no camera: it is always drawn as seen from the game's default tilt, turned by which way the
+-- character faces (as BV's own guide is). What it needs is the route (BV's, put here by BV.lua), where you are on
+-- it, and which way to point.
 ------------------------------------------------------------------------------------------------------------
 
-local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local sin, cos, tan, abs, max, min, rad, pi = math.sin, math.cos, math.tan, math.abs, math.max, math.min, math.rad, math.pi
-local TWO_PI = 2 * pi
+local huge = math.huge
 
-local DOT_TEX = "Interface\\AddOns\\Guidelime_Pathfinder\\Media\\dot" -- Pathfinder's dot image
-local DOT_COLOUR = { 0.62, 1, 0.25 }
-local MAX_DOTS = 48
+local LOOKAHEAD = 40 -- yards: the arrow points at the route this far ahead (a setting; this is the fallback)
+local CLIMB = 2.5    -- yards the route ahead rises or falls before it says "up" / "down"
+local TURN_RATE = 6  -- how fast the arrow catches up with the direction (higher = snappier)
+local TURN_MAX = 0.34 -- the arrow never looks past a hairpin: cos of the turn (110 degrees) a leg may make against the way you start out
 
-local LOOKAHEAD = 40 -- yards: the arrow points at the average of the route this far ahead (a setting; this is the fallback)
-local VFOV_PER_FOV = 0.6   -- the game's vertical field of view is 0.6 x the cameraFov setting
-local MIN_MARKER = 6       -- yards: a marker nearer than this is too close to solve the camera against
-local BELOW_COST, FLOOR_SLACK = 4, 0.5
-local KEEP_CAMERA = 0.75   -- seconds a solved camera is carried on (turned with you) for the arrow
-local FRESH = 0.1          -- seconds the dots keep using a camera without a new solve
-local SNAP = 0.035         -- radians (about 2 degrees): a camera change this big is a real move, not noise
-local RECENT = 10          -- seconds a learned camera turn and tilt are still used with nothing to line up with
-local CLIMB = 2.5          -- yards the next dots rise or fall before it says "up" / "down"
-local TURN_RATE = 6        -- how fast the arrow catches up with the direction (higher = snappier)
-
-local function dotSpacing() return cfg("dotSpacing") end
-
--- The fixed dot spot at or just behind the player on route p: a stand-in for p that starts there (seg, segT),
--- the spot itself, and how far behind the player it is (yards along the route).
-local function anchor(p, spacing)
-	local len = p.len
-	if not len or not p.seg or not len[p.n] then return end
-	local i = p.seg
-	local segL = (len[i + 1] or len[i]) - len[i]
-	local s = len[i] + (p.segT or 0) * segL -- the player's spot, yards from the route's start
-	local total = len[p.n]
-	local base = total - math.ceil((total - s) / spacing - 1e-6) * spacing
-	if base < 0 then base = 0 end
-	local j = i
-	while j > 1 and len[j] > base do j = j - 1 end
-	while j < p.n - 1 and len[j + 1] <= base do j = j + 1 end
-	local L = len[j + 1] - len[j]
-	local t = L > 0 and (base - len[j]) / L or 0
-	local view = setmetatable({ seg = j, segT = t }, { __index = p })
-	local x, y = PF.PointOnSeg(p, j, t)
-	return view, x, y, s - base, base, total
-end
-
--- The camera. World axes: E = east (= -x in HereBeDragons' coordinates), N = north (= y), U = up (= z).
-local fx, fy, fz, rx, ry, ux, uy, uz, Cx, Cy, Cz, focal, scx, scy
+-- The camera's axes, for drawing the arrow (the arrow's own view: setCamera below). World axes: E = east
+-- (= -x in HereBeDragons' coordinates), N = north (= y), U = up (= z).
+local fx, fy, fz, rx, ry, ux, uy, uz, Cx, Cy, Cz
 
 local function setCamera(yaw, pitch, F1, F2, F3, d)
 	local cyw, syw, cp, sp = cos(yaw), sin(yaw), cos(pitch), sin(pitch)
@@ -1405,198 +1276,9 @@ local function setCamera(yaw, pitch, F1, F2, F3, d)
 	Cx, Cy, Cz = F1 - d * fx, F2 - d * fy, F3 - d * fz
 end
 
--- screen spot (UIParent units from the bottom left), distance along the view, and how steeply it is seen
-local function project(E, N, U)
-	local vx, vy, vz = E - Cx, N - Cy, U - Cz
-	local cf = vx * fx + vy * fy + vz * fz
-	if cf < 0.3 then return end
-	local cr = vx * rx + vy * ry
-	local cu = vx * ux + vy * uy + vz * uz
-	return scx + focal * cr / cf, scy + focal * cu / cf, cf, vz / sqrt(vx * vx + vy * vy + vz * vz)
-end
-
-local function wrap(a) return (a + pi) % TWO_PI - pi end
-
--- Gauss-Newton on yaw and pitch: the camera that puts world point m on screen at (ox, oy).
-local function solve2(a, b, F, d, ox, oy, m)
-	local function res(p, q)
-		setCamera(p, q, F[1], F[2], F[3], d)
-		local sx, sy = project(m[1], m[2], m[3])
-		if sx then return sx - ox, sy - oy end
-	end
-	for _ = 1, 14 do
-		local r1, r2 = res(a, b)
-		if not r1 then return end
-		if r1 * r1 + r2 * r2 < 1e-4 then return a, b end -- to a hundredth of a pixel: a loose fit wobbles
-		local e = 1e-3
-		local a1, a2 = res(a + e, b)
-		local b1, b2 = res(a, b + e)
-		if not a1 or not b1 then return end
-		local j11, j21, j12, j22 = (a1 - r1) / e, (a2 - r2) / e, (b1 - r1) / e, (b2 - r2) / e
-		local det = j11 * j22 - j12 * j21
-		if abs(det) < 1e-9 then return end
-		local da = -(j22 * r1 - j12 * r2) / det
-		local db = -(-j21 * r1 + j11 * r2) / det
-		local s = max(abs(da), abs(db))
-		if s > 0.4 then da, db = da * 0.4 / s, db * 0.4 / s end
-		a, b = a + da, b + db
-	end
-	local r1, r2 = res(a, b)
-	if r1 and r1 * r1 + r2 * r2 < 9 then return a, b end
-end
-
-local cam = {} -- yaw, pitch (steadied), t (when last solved), facing (the player's facing then)
-
--- Of the cameras that fit, the one that turns least from the camera so far (and from where the character
--- faces), and is not under the floor. A marker nearer than the camera has a mirror fit behind the player.
-local function fit(facing, F, d, ox, oy, m, floorZ)
-	local best, bestYaw, bestPitch
-	local function try(y0, p0)
-		local yaw, pitch = solve2(y0, p0, F, d, ox, oy, m)
-		if not yaw or abs(pitch) >= 1.55 then return end
-		local below = max(0, floorZ - FLOOR_SLACK - (F[3] + d * sin(pitch)))
-		local score = 0.5 * abs(wrap(yaw - facing)) + BELOW_COST * below
-		if cam.yaw and cam.pitch then score = score + abs(wrap(yaw - cam.yaw)) + abs(pitch - cam.pitch) end
-		if not best or score < best then best, bestYaw, bestPitch = score, wrap(yaw), pitch end
-	end
-	if cam.yaw and cam.pitch then try(cam.yaw, cam.pitch) end
-	for _, dy in ipairs({ 0, 0.8, -0.8, pi }) do
-		for _, p0 in ipairs({ cam.pitch or 0.3, 0.9, -0.3 }) do try(facing + dy, p0) end
-	end
-	return bestYaw, bestPitch, best
-end
-
-local function cvarFov()
-	local v = C_CVar and C_CVar.GetCVar and C_CVar.GetCVar("cameraFov") or (GetCVar and GetCVar("cameraFov"))
-	return tonumber(v) or 90
-end
-
-local last = {}            -- the player's spot last frame
-local smoothZ              -- the ground height under the player, steadied (the height map comes in steps)
-local pairJump = { 0, 0 }  -- how much each pairing's fit jumps about while moving (running average)
-local usePair = 1          -- 1: the marker matches this frame's position, 2: last frame's
--- Solves (or carries on) the camera for this frame and sets it up for project(). Returns true when the
--- camera is known (solved now or lately), false when only guessed from the player's facing.
-local function updateCamera(dt, px, py, pz)
-	local ui = UIParent:GetEffectiveScale()
-	local wf = WorldFrame:GetEffectiveScale()
-	local wcx, wcy = WorldFrame:GetCenter()
-	local W, H = WorldFrame:GetWidth() * wf / ui, WorldFrame:GetHeight() * wf / ui
-	scx, scy = wcx * wf / ui, wcy * wf / ui
-	local fov = PF.db.fov
-	if fov and fov > 0 then focal = (W / 2) / tan(rad(fov) / 2) else focal = (H / 2) / tan(rad(cvarFov() * VFOV_PER_FOV) / 2) end
-	local h = (PF.db.focusHeight or 1.9) + (IsMounted() and 0.9 or 0)
-	local d = GetCameraZoom() or 0
-	local facing = GetPlayerFacing() or 0
-	local now = GetTime()
-
-	-- the camera follows the character's model, which moves smoothly; the height map under it comes in steps
-	if not smoothZ or abs(pz - smoothZ) > 3 then smoothZ = pz else smoothZ = smoothZ + (pz - smoothZ) * min(1, dt * 6) end
-	local z = smoothZ
-
-	if cam.off then cam.yaw = wrap(facing + cam.off) end
-
-	-- What to line the camera up with: the game's in-world marker for the map pin being tracked, wherever it is.
-	-- That is your own pin, left where you put it (or, with "move my map pin" on, the one Pathfinder moves along
-	-- the route, with the corner it was at a moment ago).
-	local nav = C_Navigation and C_Navigation.GetFrame and C_Navigation.GetFrame()
-	local fits = {}
-	local marks
-	if nav and not (PF.Marker and PF.Marker.probing) and C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()
-		and C_SuperTrack and C_SuperTrack.IsSuperTrackingUserWaypoint and C_SuperTrack.IsSuperTrackingUserWaypoint()
-		and C_Navigation.HasValidScreenPosition() and not C_Navigation.WasClampedToScreen() then
-		if PF.Marker and PF.Marker.IsActive() then
-			marks = { PF.Marker.at or false, PF.Marker.before or false }
-		else
-			local wp = C_Map.GetUserWaypoint()
-			if wp and wp.position then
-				local mx, my, minst = HBD():GetWorldCoordinatesFromZone(wp.position.x, wp.position.y, wp.uiMapID)
-				if mx and minst == PF.player.instance then marks = { { mx, my } } end
-			end
-		end
-	end
-	if marks then
-		local nx, ny = nav:GetCenter()
-		if nx then
-			local s = nav:GetEffectiveScale() / ui
-			local ox, oy = nx * s, ny * s
-			local gd = C_Navigation.GetDistance and C_Navigation.GetDistance()
-			local spots = { { px, py, z } }
-			if last.x then spots[2] = { last.x, last.y, last.z } end
-			for i, spot in ipairs(spots) do
-				-- the game may still show the marker at the corner before for a frame: the one at its distance
-				for _, at in ipairs(marks) do
-					if at then
-						local d2 = sqrt((at[1] - spot[1]) ^ 2 + (at[2] - spot[2]) ^ 2)
-						if not gd or abs(gd - d2) <= max(1.5, 0.05 * d2) then
-							if d2 >= MIN_MARKER then
-								-- the game draws a waypoint at the player's own height
-								local yaw, pitch = fit(facing, { -spot[1], spot[2], spot[3] + h }, d, ox, oy,
-									{ -at[1], at[2], spot[3] }, spot[3])
-								if yaw then fits[i] = { yaw, pitch } end
-							end
-							break
-						end
-					end
-				end
-			end
-		end
-	end
-	-- Which position the game's marker goes with (this frame's or last frame's) is a property of the game, not
-	-- of the frame: learn it while moving, from which pairing jumps about less, and stick with it. Picking the
-	-- better one frame by frame made the dots flicker between the two.
-	local moving = last.x and ((px - last.x) ^ 2 + (py - last.y) ^ 2) > 1e-4
-	if moving and cam.off then
-		for i = 1, 2 do
-			local fi = fits[i]
-			if fi then
-				local jump = abs(wrap(wrap(fi[1] - facing) - cam.off)) + abs(fi[2] - cam.pitch)
-				pairJump[i] = pairJump[i] * 0.97 + jump * 0.03
-			end
-		end
-		local other = 3 - usePair
-		if pairJump[other] < pairJump[usePair] * 0.6 then usePair = other end
-	end
-	local chosen = fits[usePair] or fits[1]
-	last.x, last.y, last.z = px, py, z
-
-	-- The camera is kept as its turn relative to the way the character faces (cam.off) and its tilt. Walking does
-	-- not change those, and the facing itself is exact every frame, so the fit's frame-to-frame noise (a fraction
-	-- of a degree, several pixels on screen) is averaged away while turning with the character costs no lag.
-	-- A change too big to be noise (the camera swung round with the mouse) is followed at once.
-	if chosen then
-		local off = wrap(chosen[1] - facing)
-		if cam.off and now - cam.t <= KEEP_CAMERA then
-			local dOff, dp = wrap(off - cam.off), chosen[2] - cam.pitch
-			local rate = (abs(dOff) + abs(dp) > SNAP) and 30 or cfg("smooth") * 0.1
-			local a = min(1, dt * rate)
-			cam.off = wrap(cam.off + dOff * a)
-			cam.pitch = cam.pitch + dp * a
-		else
-			cam.off, cam.pitch = off, chosen[2]
-		end
-		cam.t = now
-	end
-	local known = cam.off and now - cam.t <= KEEP_CAMERA
-	local yaw, pitch
-	if known or (cam.off and now - cam.t <= RECENT) then
-		-- solved lately: the camera turns with the character, keeping its turn and tilt
-		yaw, pitch = wrap(facing + cam.off), cam.pitch
-	else
-		-- nothing to line up with: the camera behind the character, tilted as set in the settings
-		yaw, pitch = facing, rad(cfg("camPitch"))
-	end
-	cam.yaw = yaw
-	setCamera(yaw, pitch, -px, py, z + h, d)
-	-- the dots with a camera solved just now, or (when allowed) the estimated one
-	return known, chosen ~= nil or (cam.t and now - cam.t <= FRESH) or (not known and cfg("estimate"))
-end
-
-
 ------------------------------------------------------------------------------------------------------------
--- The 3D arrow: a thick arrow at a fixed spot on the screen (66% of the way up by default; move it in the
--- settings), pointing from your feet to the average of the next 8 dots. It is turned the way the game camera
--- sees that direction: look down and you see its top, tilt the camera up and you see it from underneath.
+-- The 3D arrow: a thick arrow, in the HUD's medallion (HUD.lua) or at a fixed spot on the screen (66% of the way
+-- up by default; move it in the settings), pointing along the route from your feet.
 ------------------------------------------------------------------------------------------------------------
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -1634,18 +1316,20 @@ end
 
 -- Stretches texture t over the screen quad a-b-c-d (corners in order around it, UIParent units from the
 -- bottom left): its box spans them, and each vertex moves from the box's corner onto its corner.
-local function drawQuad(t, a, b, c, d)
-	local minX, maxX = min(a[1], b[1], c[1], d[1]), max(a[1], b[1], c[1], d[1])
-	local minY, maxY = min(a[2], b[2], c[2], d[2]), max(a[2], b[2], c[2], d[2])
+local function drawQuad(t, a, b, c, d, ox, oy)
+	ox, oy = ox or 0, oy or 0
+	local a1, a2, b1, b2, c1, c2, d1, d2 = a[1] + ox, a[2] + oy, b[1] + ox, b[2] + oy, c[1] + ox, c[2] + oy, d[1] + ox, d[2] + oy
+	local minX, maxX = min(a1, b1, c1, d1), max(a1, b1, c1, d1)
+	local minY, maxY = min(a2, b2, c2, d2), max(a2, b2, c2, d2)
 	if maxX - minX < 0.5 then maxX = minX + 0.5 end
 	if maxY - minY < 0.5 then maxY = minY + 0.5 end
 	t:ClearAllPoints()
 	t:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", minX, maxY)
 	t:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMLEFT", maxX, minY)
-	t:SetVertexOffset(UL, a[1] - minX, a[2] - maxY)
-	t:SetVertexOffset(UR, b[1] - maxX, b[2] - maxY)
-	t:SetVertexOffset(LR, c[1] - maxX, c[2] - minY)
-	t:SetVertexOffset(LL, d[1] - minX, d[2] - minY)
+	t:SetVertexOffset(UL, a1 - minX, a2 - maxY)
+	t:SetVertexOffset(UR, b1 - maxX, b2 - maxY)
+	t:SetVertexOffset(LR, c1 - maxX, c2 - minY)
+	t:SetVertexOffset(LL, d1 - minX, d2 - minY)
 	t:Show()
 end
 
@@ -1758,11 +1442,27 @@ local function renderArrow(ax, ay, dE, dN, dU, sizePx, colour)
 		r, g, b = c[1], c[2], c[3]
 	end
 	local alpha = colour and 1 or cfg("arrowAlpha")
+	-- In the HUD's medallion the arrow's visible middle is put on the medallion's: perspective and the tilt move it
+	-- off the arrow's own pivot as it turns
+	local ox, oy = 0, 0
+	if sizePx and #faces > 0 then
+		local x0, x1, y0, y1 = huge, -huge, huge, -huge
+		for _, f in ipairs(faces) do
+			for i = 1, 4 do
+				local q = f.pts[i]
+				if q[1] < x0 then x0 = q[1] end
+				if q[1] > x1 then x1 = q[1] end
+				if q[2] < y0 then y0 = q[2] end
+				if q[2] > y1 then y1 = q[2] end
+			end
+		end
+		ox, oy = ax - (x0 + x1) / 2, ay - (y0 + y1) / 2
+	end
 	for i, f in ipairs(faces) do
 		local t = quad(i)
 		t:SetDrawLayer("ARTWORK", min(7, -8 + i))
 		t:SetVertexColor(r * f.shade, g * f.shade, b * f.shade, alpha)
-		drawQuad(t, f.pts[1], f.pts[2], f.pts[3], f.pts[4])
+		drawQuad(t, f.pts[1], f.pts[2], f.pts[3], f.pts[4], ox, oy)
 	end
 	for i = #faces + 1, #quads do quads[i]:Hide() end
 
@@ -1813,87 +1513,84 @@ local function setArrowUnlocked(on)
 end
 
 ------------------------------------------------------------------------------------------------------------
--- Every frame: the camera, the dots, the arrow.
+-- Every frame: where you are on BV's route, which way to point, the arrow.
 ------------------------------------------------------------------------------------------------------------
 
-local layer = CreateFrame("Frame", nil, UIParent)
-layer:SetAllPoints()
-layer:SetFrameStrata("BACKGROUND")
-local pool = {}
-local function dot(i)
-	local t = pool[i]
-	if not t then
-		t = layer:CreateTexture(nil, "BACKGROUND")
-		t:SetTexture(DOT_TEX)
-		pool[i] = t
+-- The route being followed. BV.lua puts it here (ns.setRoute): corners x[i], y[i] (HereBeDragons world coordinates),
+-- z[i] when known, n of them. Followed from here: k the corner you head for, seg the leg you are on, segT how far
+-- along it, off how far from it, remaining the yards to the end.
+local route
+local ADVANCE = 3 -- yards from a corner that count as reaching it
+
+local function pointOnSeg(p, i, t)
+	local j = min(i + 1, p.n)
+	local z0 = p.z and p.z[i] or 0
+	local z1 = p.z and p.z[j] or 0
+	return p.x[i] + (p.x[j] - p.x[i]) * t, p.y[i] + (p.y[j] - p.y[i]) * t, z0 + (z1 - z0) * t
+end
+
+local function segDist(px, py, ax, ay, bx, by)
+	local dx, dy = bx - ax, by - ay
+	local l2 = dx * dx + dy * dy
+	local t = l2 > 1e-9 and max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) or 0
+	return dist(px, py, ax + dx * t, ay + dy * t), t
+end
+
+-- where on the route you are: only the legs near the one you were on are looked at, so a leg is not mistaken for
+-- another that lies close beside it
+local function follow(p, px, py)
+	local k0 = p.k or 2
+	local bestI, bestD, bestT = max(1, k0 - 1), huge, 0
+	for i = max(1, k0 - 2), min(p.n - 1, k0 + 4) do
+		local d, t = segDist(px, py, p.x[i], p.y[i], p.x[i + 1], p.y[i + 1])
+		if d <= bestD + 0.25 then bestI, bestD, bestT = i, d, t end
 	end
-	return t
+	local k = bestI + 1
+	if k < p.n and dist(px, py, p.x[k], p.y[k]) < ADVANCE then k = k + 1 end
+	p.k, p.seg, p.segT, p.off = k, bestI, bestT, bestD
+	p.remaining = dist(px, py, p.x[k], p.y[k]) + p.len[p.n] - p.len[k]
 end
 
--- the ground under the player: from Pathfinder's height map, else the route's own height there
-local function groundZ(p, instance, px, py)
-	local G = PF.Graph
-	local ground = G and G.HasGround(instance) and PF.player.z
-	if ground then return G.GroundZ(instance, px, py, ground, 1) or ground, true end
-	return select(3, PF.PointOnSeg(p, p.seg, p.segT or 0)), false
+function ns.setRoute(xs, ys, zs)
+	local p = { x = xs, y = ys, z = zs, n = #xs, k = 2, len = { 0 }, bv = true }
+	for i = 2, p.n do p.len[i] = p.len[i - 1] + dist(xs[i - 1], ys[i - 1], xs[i], ys[i]) end
+	route = p
+	local px, py = HBD():GetPlayerWorldPosition()
+	if px and p.n >= 2 then follow(p, px, py) end
+	return p
 end
+function ns.clearRoute() route = nil end
+function ns.getRoute() return route end
 
-------------------------------------------------------------------------------------------------------------
--- Route dots on the minimap: fixed spots every few yards along the route ahead, in the dots' colour.
-------------------------------------------------------------------------------------------------------------
-
-local HBDPins = LibStub and LibStub("HereBeDragons-Pins-2.0", true)
-local PIP = "Interface\\AddOns\\Guidelime_Pathfinder\\Media\\pip" -- a bright disc with a dark outline
-local MINI_SPACING, MINI_RANGE = 8, 260
-local miniRef, miniPool = {}, {}
-local mini = { n = 0, t = 0, x = 0, y = 0 }
-
-local function clearMinimapDots()
-	if mini.n > 0 and HBDPins then HBDPins:RemoveAllMinimapIcons(miniRef) end
-	mini.n, mini.id = 0, nil
-end
-
-local function miniPin(i)
-	local f = miniPool[i]
-	if not f then
-		f = CreateFrame("Frame")
-		f:SetSize(6, 6)
-		f.tex = f:CreateTexture(nil, "OVERLAY")
-		f.tex:SetAllPoints()
-		f.tex:SetTexture(PIP)
-		miniPool[i] = f
+-- Yards along the route from you to its first hairpin (a leg turning more than 110 degrees against the way you
+-- start out), or huge when there is none. The arrow never looks past it: a route that goes out and comes back
+-- would otherwise be aimed at a point behind you. Legs under 2 yards (a jog at the start) do not set the way.
+local function turnLimit(p)
+	local i = p.seg
+	local x, y = pointOnSeg(p, i, p.segT or 0)
+	local total, hx0, hy0 = 0, nil, nil
+	while i < p.n do
+		local x1, y1 = p.x[i + 1], p.y[i + 1]
+		local L = dist(x, y, x1, y1)
+		if L > 2 then
+			local hx, hy = (x1 - x) / L, (y1 - y) / L
+			if not hx0 then
+				hx0, hy0 = hx, hy
+			elseif hx * hx0 + hy * hy0 < -TURN_MAX then
+				return total
+			end
+		end
+		total = total + L
+		x, y = x1, y1
+		i = i + 1
 	end
-	return f
+	return huge
 end
 
--- redrawn when you have moved a few yards (or the route changed), not every frame
-local function updateMinimapDots(p, px, py, instance)
-	if not HBDPins or not p or not p.seg or not cfg("minimapTrail") then return clearMinimapDots() end
-	local now = GetTime()
-	if mini.id == p.id and (px - mini.x) ^ 2 + (py - mini.y) ^ 2 < 9 and now - mini.t < 1 then return end
-	clearMinimapDots()
-	mini.id, mini.x, mini.y, mini.t = p.id, px, py, now
-	local view, ax, ay, back = anchor(p, MINI_SPACING)
-	if not view then return end
-	local c = cfg("dotColour")
-	local n = 0
-	PF.SamplePath(view, MINI_SPACING, MINI_RANGE + back, function(x, y, _, along)
-		if along - back < 3 then return end
-		n = n + 1
-		local pin = miniPin(n)
-		pin.tex:SetVertexColor(c[1], c[2], c[3], 1)
-		HBDPins:AddMinimapIconWorld(miniRef, pin, instance, x, y, false)
-	end, ax, ay, 0)
-	mini.n = n
-end
-
-local ahead, aheadA = {}, {}
-
--- The point d yards ahead along the route's own corners, from where the player is on it (x, y, z). For a look-ahead
--- shorter than the dots are spaced, and for walked routes (which carry real heights).
+-- The point d yards ahead along the route's own corners, from where you are on it (x, y, z)
 local function routePoint(p, d, pz)
 	local i = p.seg
-	local x, y, z = PF.PointOnSeg(p, i, p.segT or 0)
+	local x, y, z = pointOnSeg(p, i, p.segT or 0)
 	if not p.z then z = pz end
 	local left = d
 	while i < p.n do
@@ -1911,9 +1608,11 @@ local function routePoint(p, d, pz)
 	return x, y, z
 end
 
--- averaged over the last 30% of the look-ahead, as the arrow does with the dots, so it does not twitch
+-- Where the arrow points: averaged over the last 30% of the look-ahead so it does not twitch, but never past the
+-- first hairpin
 local function routeAhead(p, d, pz)
 	if not p.seg or not p.x[p.seg + 1] then return end
+	d = min(d, max(3, turnLimit(p)))
 	local ax, ay, az = 0, 0, 0
 	for _, f in ipairs({ 0.7, 0.85, 1 }) do
 		local x, y, z = routePoint(p, max(d * f, 0.3), pz)
@@ -1921,163 +1620,24 @@ local function routeAhead(p, d, pz)
 	end
 	return ax / 3, ay / 3, az / 3
 end
+
 local smooth = {}
-local RECHECK_EVERY = 2   -- seconds between second looks at the dots ahead
-local RECHECK_DIFF = 1.5  -- yards a dot's height must be off by before it is moved
-local LAYER_JUMP = 5      -- yards from the route's own height that means the ground walk took another level
-local dotCache = {} -- the route's dots: id, spacing, pts[number back from the end] = { E, N, U, unsure }
--- Returns how many dots were drawn, whether guiding, and the climb ahead.
-local dbg = {} -- what the last frame saw, for /pathy debug
+
+-- Returns whether there is something to point at, and how far the route ahead rises (+) or falls (-)
 local function frame(dt)
-	local p = PF.path
-	dbg.target, dbg.path, dbg.seg, dbg.service = target ~= nil, p ~= nil, p and p.seg ~= nil, PF.service ~= nil
-	dbg.view, dbg.cached, dbg.unsure, dbg.offscreen, dbg.drawn, dbg.firstZ, dbg.sx, dbg.sy = nil, 0, 0, 0, 0, nil, nil, nil
-	local bx, by = HBD():GetPlayerWorldPosition()
-	local onBoat = reroute.update(bx, by)
-	if not target or not p or not p.seg or PF.service or UnitIsGhost("player") or UnitOnTaxi("player") or onBoat then
-		dbg.reason = not target and "no target (pick something in the Pathy window)"
-			or onBoat and "you are on a moving boat: the route goes on when you get off"
-			or not p and "Pathfinder has no route right now"
-			or not p.seg and "the route has no segment yet"
-			or PF.service and "Pathfinder's own /gpath go is active (/gpath go to stop it)"
-			or UnitIsGhost("player") and "you are a ghost" or "you are on a flight"
+	local p = route
+	local px, py = HBD():GetPlayerWorldPosition()
+	local onBoat = reroute.update(px, py)
+	if not (target and p and px and p.n >= 2) or UnitIsGhost("player") or UnitOnTaxi("player") or onBoat then
 		smooth.E = nil
-		clearMinimapDots()
-		return 0
+		return false
 	end
-	local px, py, instance = HBD():GetPlayerWorldPosition()
-	if not px then dbg.reason = "the game gives no position here"; return 0 end
-	dbg.reason = nil
-	local pz, hasGround = groundZ(p, instance, px, py)
-	local known, fresh = updateCamera(dt, px, py, pz)
-	dbg.known, dbg.fresh, dbg.pz, dbg.ground, dbg.zoom = known, fresh, pz, hasGround, GetCameraZoom()
-	dbg.pitch, dbg.off = cam.pitch, cam.off
-	dbg.graph, dbg.pathZ = p.graph, p.z ~= nil
-
-	-- The dots: each one's place in the world (and its height on the ground) is worked out once and kept for
-	-- the route, numbered back from the route's end; every frame only projects them. Working them out afresh each
-	-- frame let their heights follow the player's own and wobble as you walked.
-	local spacing = dotSpacing()
-	local view, ax, ay, back, base, total = anchor(p, spacing)
-	local range, size, alpha, colour = cfg("dotRange"), cfg("dotSize"), cfg("dotAlpha"), cfg("dotColour")
-	local lookahead = cfg("arrowAhead") or LOOKAHEAD
-	local reach = max(range, lookahead)
-	local aheadMax = math.ceil(lookahead / spacing) + 2
-	local noPath = not p.graph and not p.walked -- only the straight line: no dots for a route that is not one
-	local drawDots = fresh and cfg("dots") and not noPath
-	local n, nAhead = 0, 0
-	if view then
-		if dotCache.id ~= p.id or dotCache.spacing ~= spacing or not p.graph then
-			dotCache.id, dotCache.spacing, dotCache.pts = p.id, spacing, {}
-		end
-		local pts = dotCache.pts
-		dbg.view = true
-		local k0 = floor((total - base) / spacing + 0.5) -- the anchor's number
-		local kLast = max(0, k0 - math.ceil((reach + back) / spacing))
-		local missing = false
-		for k = k0 - 1, kLast, -1 do if not pts[k] then missing = true break end end
-		-- Looked at again every couple of seconds as you go, so a dot put on the wrong level is put right; a
-		-- dot only moves if its height is off by more than RECHECK_DIFF (smaller changes would bring back the
-		-- wobble).
-		local now = GetTime()
-		if missing or now - (dotCache.t or 0) > RECHECK_EVERY then
-			dotCache.t = now
-			-- the walk starts on the ground at the anchor, on the route's own level there
-			local lineZ0 = p.z and select(3, PF.PointOnSeg(p, view.seg, view.segT)) or pz
-			local z0 = hasGround and (PF.Graph.GroundZ(instance, ax, ay, lineZ0, 1) or lineZ0) or nil
-			PF.SampleGround(view, instance, ax, ay, z0, spacing, reach + back, function(x, y, z, along, lineZ, unsure)
-				local k = floor((total - base - along) / spacing + 0.5)
-				if k < 0 then return end
-				-- the ground walk can step onto another level (the hillside over a cave, a bridge over the
-				-- path): far from the route's own height, the route's height is the one to trust
-				if p.graph and p.z and lineZ and abs(z - lineZ) > LAYER_JUMP then
-					z = PF.Graph.GroundZ(instance, x, y, lineZ, 0) or lineZ
-					if abs(z - lineZ) > LAYER_JUMP then z = lineZ end
-				end
-				-- a straight line (no walk grid here) says nothing about the ground it crosses: following the height
-				-- map along it climbs onto roofs and over buildings, so keep the dots level with the player
-				if not p.graph then z = pz end
-				local old = pts[k]
-				if not old then
-					pts[k] = { -x, y, z, unsure }
-				elseif abs(old[3] - z) > RECHECK_DIFF then
-					old[3], old[4] = z, unsure
-				end
-			end)
-		end
-		for k = k0 - 1, kLast, -1 do
-			local pt = pts[k]
-			if not pt then break end
-			dbg.cached = dbg.cached + 1
-			if pt[4] then dbg.unsure = dbg.unsure + 1 end
-			if not dbg.firstZ then dbg.firstZ = pt[3] end
-			local a = (k0 - k) * spacing - back -- yards ahead of the player along the route
-			if a >= 0.5 then
-				if nAhead < aheadMax and (nAhead == 0 or a <= lookahead) then
-					nAhead = nAhead + 1
-					ahead[nAhead], aheadA[nAhead] = pt, a
-				end
-				if drawDots and n < MAX_DOTS and a >= 1.5 and a <= range and not pt[4] then
-					local sx, sy, cf, dirz = project(pt[1], pt[2], pt[3] + 0.05)
-					if not sx then dbg.offscreen = dbg.offscreen + 1 end
-					if sx then
-						dbg.drawn = dbg.drawn + 1
-						if dbg.drawn == 1 then dbg.sx, dbg.sy = sx, sy end
-						n = n + 1
-						local t = dot(n)
-						local sz = min(40, max(3, size * focal / cf))
-						t:SetSize(sz, sz * min(1, max(0.15, -dirz)))
-						t:ClearAllPoints()
-						t:SetPoint("CENTER", UIParent, "BOTTOMLEFT", sx, sy)
-						t:SetVertexColor(colour[1], colour[2], colour[3])
-						local fadeIn = min(1, (a - 1.5) / 4) -- the ones you reach fade out under your feet
-						local fadeOut = min(1, (range - a) / (range * 0.35))
-						t:SetAlpha(alpha * fadeIn * fadeOut)
-						t:Show()
-					end
-				end
-			end
-		end
-	end
-
-	if noPath then clearMinimapDots() else updateMinimapDots(p, px, py, instance) end
-
-	-- the arrow: from the player's feet to the average of the next dots (or the route's end, nearly there)
-	local aE, aN, aU
-	if (lookahead < 2 * spacing or (p.walked and p.z)) and p.seg then
-		-- a look-ahead shorter than the dots are apart, or a walked route with real heights: aim along the route itself
-		local sx, sy, sz = routeAhead(p, lookahead, pz)
-		if sx then aE, aN, aU = -sx, sy, sz end
-	end
-	if aE then
-		-- (aimed along the route)
-	elseif nAhead > 0 then
-		-- Aim at the far end of the look-ahead (the last 30% of it, averaged for steadiness). Averaging every
-		-- point from the player's feet outwards aimed at about half the distance.
-		local from = 1
-		while from < nAhead and aheadA[from] < lookahead * 0.7 do from = from + 1 end
-		aE, aN, aU = 0, 0, 0
-		for i = from, nAhead do aE, aN, aU = aE + ahead[i][1], aN + ahead[i][2], aU + ahead[i][3] end
-		local cnt = nAhead - from + 1
-		aE, aN, aU = aE / cnt, aN / cnt, aU / cnt
-	else
-		aE, aN, aU = -p.x[p.n], p.y[p.n], p.z and p.z[p.n] or pz
-	end
-	local dE, dN, dU = aE + px, aN - py, aU - pz
-	-- Close to the target: point straight at it and give the straight distance. The walked route can wind round a
-	-- counter or a corner (22 yd of route to someone 4 yd away), which is no help once you can see them.
-	smooth.nearDist = nil
-	if target.instance == instance then
-		local sd = dist(px, py, target.x, target.y)
-		-- On another level (an NPC on a second floor, a cave under you): the route is the way, not the straight
-		-- line through the floor. His height is the learned one, else where the route ends.
-		local endZ = p.z and p.z[p.n]
-		local otherLevel = pz and ((target.z and abs(target.z - pz) > 3) or (endZ and abs(endZ - pz) > 3))
-		if sd < 12 and not otherLevel then
-			dE, dN, dU = px - target.x, target.y - py, 0
-			smooth.nearDist = sd
-		end
-	end
+	follow(p, px, py)
+	local _, _, rz = pointOnSeg(p, p.seg, p.segT or 0)
+	local pz = (ns.height and ns.height()) or (p.z and rz) or 0
+	local sx, sy, sz = routeAhead(p, cfg("arrowAhead") or LOOKAHEAD, pz)
+	if not sx then return false end
+	local dE, dN, dU = -sx + px, sy - py, sz - pz
 	local l = sqrt(dE * dE + dN * dN + dU * dU)
 	if l > 1e-3 then
 		dE, dN, dU = dE / l, dN / l, dU / l
@@ -2090,20 +1650,32 @@ local function frame(dt)
 			smooth.U = smooth.U + (dU - smooth.U) * k
 		end
 	end
-	return n, true, (p.graph or p.z) and (aU - pz) or 0
+	return true, sz - pz
 end
 
 local errors = {}
 local function report(err)
-	dbg.err = tostring(err)
 	if not errors[err] then errors[err] = true; Print("|cffff4040error:|r " .. tostring(err)) end
+end
+
+-- A group member you are guided to moves: the place follows them (BV.lua plans again when it has moved)
+local function followUnit()
+	if target and target.guid and GetTime() - (target.checked or 0) > 0.2 then
+		target.checked = GetTime()
+		local u = unitByGuid(target.guid)
+		local x, y, inst
+		if u then x, y, inst = unitWorldPos(u) end
+		if x and (inst ~= target.instance or dist(x, y, target.x, target.y) > FOLLOW_MOVE) then
+			target.x, target.y, target.instance, target.z = x, y, inst, nil
+		end
+	end
 end
 
 local driver = CreateFrame("Frame")
 driver:SetScript("OnUpdate", function(_, dt)
-	local ok, n, guiding, climb = pcall(frame, dt)
-	if not ok then report(n); n, guiding = 0, false end
-	for i = n + 1, #pool do pool[i]:Hide() end
+	followUnit()
+	local ok, guiding, climb = pcall(frame, dt)
+	if not ok then report(guiding); guiding = false end
 
 	local ax, ay, hudSize, hudColour = arrowSpot()
 	if ax == false then return hideArrowShape() end -- the HUD shows a symbol in the medallion
@@ -2114,9 +1686,8 @@ driver:SetScript("OnUpdate", function(_, dt)
 	end
 	if not arrow:IsShown() then return end
 	if guiding and smooth.E then
-		-- The arrow ignores the camera's pitch: it is always drawn as seen from the default tilt, turned only by
-		-- which way the camera faces. (The dots were drawn with the real camera just before.)
-		setCamera(cam.yaw or GetPlayerFacing() or 0, rad(ARROW_TILT), 0, 0, 0, 1)
+		-- The arrow is always drawn as seen from the default tilt, turned only by which way the character faces
+		setCamera(GetPlayerFacing() or 0, rad(ARROW_TILT), 0, 0, 0, 1)
 		local okA, err = pcall(renderArrow, ax, ay, smooth.E, smooth.N, smooth.U, hudSize, hudColour)
 		if not okA then report(err); return hideArrowShape() end
 		if hudSize then
@@ -2131,8 +1702,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 			else
 				arrow.climb:SetText("")
 			end
-			local p = PF.path
-			local rem = smooth.nearDist or (p and p.remaining)
+			local rem = route and route.remaining
 			arrow.dist:SetText(rem and format("%d yd", floor(rem + 0.5)) or "")
 		else
 			arrow.climb:SetText("")
@@ -2140,7 +1710,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 		end
 	elseif target and not handle:IsShown() then
 		hideArrowShape()
-		local why = noRouteText() or dbg.reason
+		local why = noRouteText()
 		if why and not hudSize then
 			arrow.climb:ClearAllPoints()
 			arrow.climb:SetPoint("TOP", UIParent, "BOTTOMLEFT", ax, ay)
@@ -2237,7 +1807,7 @@ end
 local toggleSettings, applied, registerOptionsEntry
 do
 local S = CreateFrame("Frame", "PathySettings", UIParent, "BackdropTemplate")
-S:SetSize(600, 800)
+S:SetSize(600, 730)
 S:SetPoint("CENTER", 0, 40)
 S:SetFrameStrata("MEDIUM")
 S:SetToplevel(true)
@@ -2268,16 +1838,6 @@ onArrowMoved = refreshSettings
 
 -- a setting changed: things that need more than being read next frame
 function applied(key)
-	if key == "usePin" and target and PF and PF.db then
-		PF.db.marker = cfg("usePin")
-		if not cfg("usePin") and PF.Marker and PF.Marker.IsActive and PF.Marker.IsActive() then
-			PF.Marker.Release() -- takes away only the pin Pathfinder placed
-			restorePlayerPin()
-		elseif cfg("usePin") then
-			savePlayerPin()
-			if PF.Marker and PF.Marker.ResetOverride then PF.Marker.ResetOverride() end
-		end
-	end
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
@@ -2420,18 +1980,16 @@ button(S, "Reset position", 120, L + 140, -334, function()
 	refreshSettings()
 end)
 
--- right column: the dots, and the rest
-header(S, "Dots", R, -42)
-checkbox(S, "dots", "Show the ground dots", R, -60)
-slider(S, "dotSize", "Size", R + 4, -92, 0.2, 2, 0.05, "%.2f yd")
-slider(S, "dotAlpha", "Opacity", R + 4, -132, 0.05, 1, 0.05, "%d%%", 100)
-swatch(S, "dotColour", "Colour", R + 4, -172)
-slider(S, "dotSpacing", "Spacing", R + 4, -204, 2, 10, 1, "%d yd")
-slider(S, "dotRange", "How far ahead", R + 4, -244, 20, 150, 5, "%d yd")
-slider(S, "smooth", "Steadiness (lower = steadier, slower to follow the camera)", R + 4, -284, 2, 60, 1, "%d")
-header(S, "Minimap", R, -330)
-checkbox(S, "minimapButton", "Pathy button on the minimap", R, -348)
-checkbox(S, "minimapTrail", "Route dots on the minimap", R, -372)
+-- right column: the minimap, Questie, the HUD
+header(S, "Minimap", R, -42)
+checkbox(S, "minimapButton", "Pathy button on the minimap", R, -60)
+header(S, "Questie", R, -102)
+checkbox(S, "followTracked", "Guide to the quest I focus in Questie's tracker", R, -120)
+slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", R + 4, -156, 1, 120, 1, "%d yd")
+header(S, "HUD (BV's route)", R, -216)
+checkbox(S, "guidePanel", "Show the HUD: a copy of BV's guide window, with its buttons (drag it anywhere)", R, -234)
+checkbox(S, "hideBVGuide", "Hide BV's own guide window while Pathy guides (it comes back afterwards)", R, -270)
+checkbox(S, "silenceBV", "Silence BV's chat messages (they stay in BV's log and /pathy bv)", R, -306)
 
 header(S, "Text under the arrow", L, -372)
 slider(S, "textAlpha", "Opacity", L + 4, -392, 0.05, 1, 0.05, "%d%%", 100)
@@ -2445,19 +2003,8 @@ end)
 
 slider(S, "windowAlpha", "Pathy window background opacity", L + 4, -584, 0, 1, 0.05, "%d%%", 100)
 slider(S, "uiScale", "Pathy window size (UI scale)", L + 4, -624, 0.5, 1.5, 0.05, "%d%%", 100)
-header(S, "Lining up the dots", R, -402)
-checkbox(S, "usePin", "Move my map pin along the route (exact dots)", R, -420)
-checkbox(S, "estimate", "Show dots with no map pin to line up with", R, -444)
-slider(S, "camPitch", "Camera tilt to assume then", R + 4, -476, 0, 70, 1, "%d")
-header(S, "Questie", R, -514)
-checkbox(S, "followTracked", "Guide to the quest I focus in Questie's tracker", R, -532)
-slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", R + 4, -562, 1, 120, 1, "%d yd")
-header(S, "HUD (BV's route)", R, -612)
-checkbox(S, "guidePanel", "Show the HUD: a copy of BV's guide window, with its buttons (drag it anywhere)", R, -630)
-checkbox(S, "hideBVGuide", "Hide BV's own guide window while Pathy guides (it comes back afterwards)", R, -666)
-checkbox(S, "silenceBV", "Silence BV's chat messages (they stay in BV's log and /pathy bv)", R, -702)
 
-button(S, "Reset everything to defaults", 220, 190, -752, function()
+button(S, "Reset everything to defaults", 220, 190, -686, function()
 	for k in pairs(DEFAULTS) do PathyDB[k] = nil end
 	for k in pairs(DEFAULTS) do applied(k) end
 	refreshSettings()
@@ -2484,8 +2031,8 @@ function registerOptionsEntry()
 	d:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, -8)
 	d:SetPoint("RIGHT", -16, 0)
 	d:SetJustifyH("LEFT")
-	d:SetText("Ground dots and a 3D arrow that walk you to quest givers, turn-ins, your map pin or your target.\n\n"
-		.. "Pathy's settings are in their own window, so you can see the arrow and dots change while you adjust them. "
+	d:SetText("A 3D arrow, and a copy of BV's guide window, that lead you to quest givers, turn-ins, your map pin or your target along BV's route.\n\n"
+		.. "Pathy's settings are in their own window, so you can see the arrow change while you adjust it. "
 		.. "You can also open it with /pathy config, or by shift-clicking Pathy's minimap button.")
 	local b = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
 	b:SetSize(200, 26)
@@ -2665,10 +2212,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 		updateMinimapButton()
 		pcall(registerOptionsEntry)
 	elseif event == "PLAYER_LOGIN" then
-		if not PF or not PF.GetTarget then
-			return Print("|cffff4040Guidelime Pathfinder is not loaded|r: enable Guidelime and Guidelime Pathfinder in the AddOns list.")
-		end
-		hookPathfinder()
+		pcall(restoreOldSettings)
 		pcall(ctx.install)
 		-- the window was open when you left: open it again (after Questie has had a moment to load)
 		if PathyDB.shown then C_Timer.After(2, function() if not f:IsShown() then f:Show() end end) end
@@ -2678,29 +2222,10 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 		if TU and TU.SetQuestTomTomTarget then
 			hooksecurefunc(TU, "SetQuestTomTomTarget", function(questId) pcall(guideToQuest, questId) end)
 		end
-		-- Older versions moved your map pin while guiding and kept yours aside: give it back once, after
-		-- Pathfinder has taken away the one it moved (it looks ten times a second).
-		if not cfg("usePin") and PathyDB.savedPin then
-			local pin = PathyDB.savedPin
-			C_Timer.After(2, function()
-				PathyDB.savedPin = nil
-				if PF.Marker and PF.Marker.IsActive() then PF.Marker.Release() end
-				if not (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then
-					pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(pin[1], pin[2], pin[3]))
-					if pin[4] and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then C_SuperTrack.SetSuperTrackedUserWaypoint(true) end
-				end
-			end)
-		end
-		-- after Pathfinder's own hook of the same function (it hooks on login too)
-		C_Timer.After(1, hookDestinationReached)
 		local saved = PathyDB.target
-		if not saved then -- settings or a pin left behind by a crash
-			restorePlayerPin()
-			setQuiet(false)
-		else
+		if saved then
 			C_Timer.After(5, function() -- once Questie has loaded its database
 				if not target and PathyDB.target == saved then pcall(resume, saved) end
-				if not target then restorePlayerPin(); setQuiet(false) end
 			end)
 		end
 	elseif event == "QUEST_REMOVED" or event == "PLAYER_LEVEL_UP" then
@@ -2754,25 +2279,11 @@ SlashCmdList.PATHY = function(msg)
 		goTargetNpc()
 	elseif lower == "config" or lower == "settings" or lower == "options" then
 		toggleSettings()
-	elseif lower == "arrow" or lower == "dots" or lower == "minimap" then
+	elseif lower == "arrow" or lower == "minimap" then
 		local key = lower == "minimap" and "minimapButton" or lower
 		PathyDB[key] = not cfg(key)
 		applied(key)
-		Print(({ arrow = "arrow", dots = "ground dots", minimapButton = "minimap button" })[key] .. " " .. onOff(cfg(key)))
-	elseif lower == "debug" then
-		local function v(x) if type(x) == "number" then return format("%.2f", x) end return tostring(x) end
-		Print("why nothing is drawn: " .. (dbg.reason or "(nothing stopping it)") .. (dbg.err and ("  |cffff4040last error:|r " .. dbg.err) or ""))
-		Print(format("guiding %s, route %s (seg %s, walk grid %s, heights %s), Pathfinder service %s",
-			v(dbg.target), v(dbg.path), v(dbg.seg), v(dbg.graph), v(dbg.pathZ), v(dbg.service)))
-		Print(format("dots setting %s, camera solved lately %s, allowed to draw %s, estimate allowed %s, tracked pin %s",
-			v(cfg("dots")), v(dbg.known), v(dbg.fresh), v(cfg("estimate")),
-			v(C_SuperTrack and C_SuperTrack.IsSuperTrackingUserWaypoint and C_SuperTrack.IsSuperTrackingUserWaypoint())))
-		Print(format("camera: tilt %s rad, turn from facing %s, zoom %s; ground under you %s (height map %s)",
-			v(dbg.pitch), v(dbg.off), v(dbg.zoom), v(dbg.pz), v(dbg.ground)))
-		Print(format("dots: anchor %s, kept ahead %s, unsure %s, first height %s, behind camera %s, drawn %s (first at %s, %s)",
-			v(dbg.view), v(dbg.cached), v(dbg.unsure), v(dbg.firstZ), v(dbg.offscreen), v(dbg.drawn), v(dbg.sx), v(dbg.sy)))
-		local p = PF.path
-		if p and p.x then Print(format("route: %d corners, %.0f yd left", p.n or 0, p.remaining or 0)) end
+		Print(({ arrow = "arrow", minimapButton = "minimap button" })[key] .. " " .. onOff(cfg(key)))
 	elseif lower == "bv" then
 		ns.BV.report()
 	elseif lower == "hud" then
@@ -2786,7 +2297,7 @@ SlashCmdList.PATHY = function(msg)
 		Print("/pathy stop  - stop guiding")
 		Print("/pathy bv  - what BV Addon Suite planned for the current destination, and what Pathy is drawing")
 		Print("/pathy hud  - show or hide the HUD (a copy of BV's guide window)")
-		Print("/pathy arrow | dots | minimap  - turn the arrow / the ground dots / the minimap button on or off")
+		Print("/pathy arrow | minimap  - turn the arrow / the minimap button on or off")
 		Print("/pathy config  - settings: the arrow's and dots' size, opacity, colour, position...")
 	else
 		local ok, entries = pcall(allEntries)

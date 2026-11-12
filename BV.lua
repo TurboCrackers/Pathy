@@ -1,11 +1,9 @@
 -- Pathy's routing: BV Addon Suite - Routing, and nothing else.
 --
 -- BV plans the way (its own navmesh planner, which knows walls, slopes, stairs, city levels, lifts, flights, boats
--- and zeppelins, on both continents) and leads along it; Pathy shows it with its arrow and dots. Pathy has no
--- route logic of its own: no walked spots, no Pathfinder routes, no QuestTrail lines. Guidelime Pathfinder is
--- still loaded, but only as the engine that draws and follows the line (its marker, its ground heights): the
--- route it plans for itself is thrown away every moment, and when BV has no route the arrow says so and shows
--- nothing else.
+-- and zeppelins, on both continents) and leads along it; Pathy shows it with its 3D arrow. Pathy has no route
+-- logic of its own, and no other addon is needed for it: no walked spots, no Pathfinder, no QuestTrail lines. When
+-- BV has no route the arrow says so and shows nothing else.
 --
 -- How it works: BV keeps its plan in BVAddonSuiteCore.Routing.Navigate (steps, the current step, the point you are
 -- up to on it). Pathy hands it the destination (Navigate:Start, as /bv route does) and copies the points of the
@@ -15,12 +13,11 @@
 -- Needs BV Core, Map Data and Routing (CurseForge: "BV Addon Suite").
 
 local ADDON, ns = ...
-local PF = GuidelimePathfinder
 local floor, max, min, abs = math.floor, math.max, math.min, math.abs
 
 local BV = {}
 ns.BV = BV
-local st = { startAt = -100, suppressed = 0 }
+local st = { startAt = -100 }
 
 local function routing()
 	local core = rawget(_G, "BVAddonSuiteCore")
@@ -53,18 +50,6 @@ local function silenceBV()
 	end
 end
 silenceBV()
-
--- Pathfinder follows what is on screen (its marker, its progress along the line), but must not plan: it would put a
--- route of its own there, or clear the line when it has none, and the line would flash between the two. Its planning
--- is turned off; all it keeps is a destination on your own continent, which its loop needs to go on following.
-if PF and PF.Plan then
-	PF.Plan = function()
-		local pl = PF.player
-		PF.dest = pl and pl.instance and { instance = pl.instance, x = pl.x, y = pl.y } or nil
-		PF.planning = false
-	end
-	PF.PlanTrip = function() PF.trip, PF.riding = nil, nil end
-end
 
 -- Your height, from BV's own measurement (the NPCs near you, by the game's range checks): the middle of its band
 -- when the band is narrow, else nil
@@ -144,9 +129,8 @@ local function fillZ(zs, n)
 end
 
 -- Douglas-Peucker: drops the points within tol yards of the line between their neighbours (a change of height
--- counts, so a stair keeps its corners). BV's points lie a yard or two apart; Pathfinder's marker (the in-world pin
--- the dots line up to) moves from corner to corner and is meant for a route of real bends, not of hundreds of
--- points: with every point a corner it jumps all the time and the dots and the arrow flash.
+-- counts, so a stair keeps its corners). BV's points lie a yard or two apart; the arrow follows a route of real bends,
+-- and a few corners are cheaper to follow than hundreds of points.
 local function simplify(xs, ys, zs, tol)
 	local n = #xs
 	local keep = { [1] = true, [n] = true }
@@ -186,24 +170,44 @@ local function simplify(xs, ys, zs, tol)
 	return ox, oy, oz
 end
 
--- the walking leg you are on, from the point BV says you are up to, as a Pathy route (world coordinates, heights),
--- reduced to its real bends. Built once per leg: Pathfinder follows it from there (where you are on it, how far
--- is left) and BV replaces the leg when it plans again.
+ns.height = heightNow -- (for the arrow, in Pathy.lua)
+
+-- The walking leg you are on, as a Pathy route (world coordinates, heights), reduced to its real bends. It starts from
+-- the point of BV's path nearest to you (never earlier than where BV says you are up to, less two), so a point
+-- of the path that lies behind you, or a jog back at its start, is not part of it: the arrow never starts out
+-- pointing backwards for that. Built once per leg: Pathy follows it from there, and BV replaces the leg when it
+-- plans again.
 local function applyWalk(N, step, px, py)
 	local H = ns.HBD()
 	local cont, pts = step.from.cont, step.path
-	local xs, ys, zs = { px }, { py }, { heightNow() or false }
-	for j = max(1, N.ahead or 1), #pts do
+	local first = max(1, (N.ahead or 1) - 2)
+	local wx, wy = {}, {}
+	for j = first, #pts do
 		local x, y = H:GetWorldCoordinatesFromZone(pts[j][1], pts[j][2], cont)
-		if x then xs[#xs + 1], ys[#ys + 1], zs[#zs + 1] = x, y, pts[j].z or false end
+		wx[j], wy[j] = x, y
+	end
+	-- the leg of the path nearest to you; the route goes on from its far end
+	local near, nearD = first, math.huge
+	for j = first, #pts - 1 do
+		if wx[j] and wx[j + 1] then
+			local ax, ay, bx, by = wx[j], wy[j], wx[j + 1], wy[j + 1]
+			local dx, dy = bx - ax, by - ay
+			local len2 = dx * dx + dy * dy
+			local f = len2 > 1e-9 and max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) or 0
+			local d = ns.dist(px, py, ax + dx * f, ay + dy * f)
+			if d < nearD then near, nearD = j, d end
+		end
+	end
+	local xs, ys, zs = { px }, { py }, { heightNow() or false }
+	for j = near + 1, #pts do
+		if wx[j] then xs[#xs + 1], ys[#ys + 1], zs[#zs + 1] = wx[j], wy[j], pts[j].z or false end
 	end
 	local ex, ey = H:GetWorldCoordinatesFromZone(step.to.x, step.to.y, step.to.cont)
 	if ex and ns.dist(xs[#xs], ys[#ys], ex, ey) > 1 then xs[#xs + 1], ys[#ys + 1], zs[#zs + 1] = ex, ey, step.to.z or false end
 	if #xs < 2 then return false end
 	local fz = fillZ(zs, #xs)
 	xs, ys, fz = simplify(xs, ys, fz, 1)
-	PF.SetPath({ x = xs, y = ys, z = fz, n = #xs, walked = true, bv = true }, false)
-	st.path = PF.path
+	st.path = ns.setRoute(xs, ys, fz)
 	return true
 end
 
@@ -222,16 +226,6 @@ local function describe(R, N, t)
 	local say = safe(N.Say, N, step, left) or step.kind
 	local total = N.seconds and safe(N.Clock, N.seconds)
 	return string.format("BV route: step %d of %d - %s%s", N.current or 0, #N.steps, say, total and (" (about " .. total .. " in all)") or "")
-end
-
--- Pathfinder plans a route of its own for the target it is handed (it draws and follows the line, so it has to
--- be handed one): it is never shown, taken away as soon as it appears
-local function suppress()
-	local p = PF.path
-	if p and not p.bv then
-		safe(PF.Pause)
-		st.suppressed = st.suppressed + 1
-	end
 end
 
 -- The guide panel ---------------------------------------------------------------------------------------------
@@ -379,32 +373,32 @@ local function route(now)
 	end
 	if not N then
 		ns.bvText = "BV Addon Suite - Routing is not loaded: install BV Core, Map Data and Routing and restart the game"
-		return suppress()
+		return
 	end
 	local px, py = ns.HBD():GetPlayerWorldPosition()
 	if not px then
 		ns.bvText = "the game gives no position here"
-		return suppress()
+		return
 	end
 	local key = t.instance .. ":" .. floor(t.x) .. ":" .. floor(t.y)
 	-- a new destination: BV plans it
 	if key ~= st.key then
 		if N.busy then
 			ns.bvText = "BV is still busy with the last route..."
-			return suppress()
+			return
 		end
 		local goal = makeGoal(R, t)
 		if not goal then
 			ns.bvText = "BV cannot place this destination on a continent map"
-			return suppress()
+			return
 		end
-		st.key, st.goal, st.startAt, st.sawSteps, st.suppressed, st.stoppedByUser = key, goal, now, nil, 0, nil
+		st.key, st.goal, st.startAt, st.sawSteps, st.stoppedByUser = key, goal, now, nil, nil
 		local ok, err = pcall(N.Start, N, goal)
 		if not ok then
 			st.goal = nil
 			ns.bvText = "BV error: " .. tostring(err)
 		end
-		return suppress()
+		return
 	end
 	-- BV dropped its route (stopped, or ended) while you still have a destination far away: plan it again, not
 	-- more than once in 10 seconds, and never when BV said it has no way (nothing was ever planned)
@@ -412,16 +406,15 @@ local function route(now)
 		st.startAt = now
 		st.sawSteps = nil
 		safe(N.Start, N, st.goal)
-		return suppress()
+		return
 	end
 	if N.steps and N.goal == st.goal then st.sawSteps = true end
 	ns.bvText = describe(R, N, t)
 	local step = N.steps and N.goal == st.goal and N.steps[N.current]
 	if step and step.kind == "walk" and type(step.path) == "table" and #step.path >= 2 then
 		-- the leg you walk: only when it is another leg or BV planned it again (its path is a new table), or something
-		-- else put a route there. Not as you walk along it: replacing the route re-places Pathfinder's marker, and the
-		-- dots and the arrow, which line up to it, flash
-		if st.sigSteps ~= N.steps or st.sigCurrent ~= N.current or st.sigPath ~= step.path or PF.path ~= st.path then
+		-- else put a route there. Not as you walk along it: Pathy follows the leg from where you are
+		if st.sigSteps ~= N.steps or st.sigCurrent ~= N.current or st.sigPath ~= step.path or ns.getRoute() ~= st.path then
 			if applyWalk(N, step, px, py) then
 				st.sigSteps, st.sigCurrent, st.sigPath = N.steps, N.current, step.path
 			end
@@ -429,9 +422,8 @@ local function route(now)
 	elseif step then
 		-- a lift, a flight, a ride: nothing to draw, the line says what to do
 		st.sigSteps, st.path = nil, nil
-		if PF.path then safe(PF.Pause) end
+		ns.clearRoute()
 	end
-	suppress()
 end
 
 local function tick(now)
@@ -487,7 +479,7 @@ function BV.report()
 				step.kind == "walk" and string.format("  [%s, %d yd, %d points]", tostring(step.status or "ok"), floor(step.yards or 0), type(step.path) == "table" and #step.path or 0) or ""))
 		end
 	end
-	local p = PF.path
-	P(string.format("Pathy is drawing: %s; Pathfinder's own route was thrown away %d times", p and (p.bv and ("BV's leg (" .. p.n .. " points, " .. (p.z and "with heights" or "no heights") .. ")") or "something that is NOT BV's") or "nothing", st.suppressed))
+	local p = ns.getRoute()
+	P(string.format("Pathy is following: %s", p and string.format("BV's leg (%d points, %s, %d yd left)", p.n, p.z and "with heights" or "no heights", floor(p.remaining or 0)) or "nothing"))
 	for i = max(1, #(R.log or {}) - 4), #(R.log or {}) do P("  BV log: " .. R.log[i]) end
 end

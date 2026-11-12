@@ -60,6 +60,22 @@ function HUD.menu(owner)
 	end)
 end
 
+-- "THEN <where>" says nothing new on the last step, where the line above already names the destination ("to
+-- Warden Thelwater" and then "there: Warden Thelwater"): then the label and its line both go
+local function tidy(f, N)
+	local goal = N and N.goal and N.goal.name
+	local last = N and N.steps and not N.steps[(N.current or 1) + 1]
+	local redundant = false
+	if last and goal and goal ~= "" then
+		for _, label in ipairs({ f.target, f.now }) do
+			local text = label:GetText()
+			if text and text:find(goal, 1, true) then redundant = true end
+		end
+	end
+	f.thenLabel:SetShown(not redundant)
+	f.next:SetShown(not redundant)
+end
+
 -- BV's constructor on Pathy's own object: the frame it makes is ours
 local function build(R)
 	if failed then return end
@@ -118,9 +134,12 @@ local function build(R)
 		if N and (N.steps or N.busy) and ns.getTarget() then
 			local good, err = pcall(o.Paint, o)
 			if not good then reportOnce(err) end
-			-- BV's flat arrow (the filled "course") gives way to Pathy's 3D arrow in the same place; the hollow
-			-- target point on the ring, the forward tick and the symbols (a lift, a flight) stay as BV draws them
+			-- BV's flat arrow (the filled "course") gives way to Pathy's 3D arrow in the same place, and its
+			-- hollow target point (the diamond on the ring) is not shown: it was not clear what it meant. The
+			-- forward tick and the symbols (a lift, a flight) stay as BV draws them
 			f.course:Hide()
+			f.point:Hide()
+			tidy(f, N)
 		end
 	end)
 	place(f)
@@ -180,6 +199,8 @@ function HUD.paint(R, N, t)
 		f.flightTip:Hide()
 		f.course:Hide()
 		f.point:Hide()
+		f.thenLabel:Hide()
+		f.next:Hide()
 		obj:NeutralDirection("circle-help")
 	end
 	return true
