@@ -141,6 +141,11 @@ local function build(R)
 	tip(f.flightTip, "Flight points not known", "A flight map shows only its own continent. Talk to a flight master there and open the flight map once: the way then uses the flight points you have.")
 	f.guideHelp = "The arrow points along the route. Drag the guide to move it; right-click it for its menu."
 	layout(f)
+	-- The painter hides the small "flight points not known" strip and shows it again every time it paints (twenty
+	-- times a second) whenever there is a flight note; hiding a control that has a tooltip also hides the shared
+	-- tooltip, so a tooltip on any button vanished within a twentieth of a second. That one Hide is made to do
+	-- nothing: the painter's own SetShown still shows and hides the strip as the note comes and goes.
+	if f.flightTip then f.flightTip.Hide = function() end end
 	-- not BV's window: its own placement, ticker and menu are not wanted
 	f:SetScript("OnShow", nil)
 	f:SetScript("OnHide", nil)
