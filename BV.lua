@@ -1,0 +1,433 @@
+-- Pathy's routing: BV Addon Suite - Routing, and nothing else.
+--
+-- BV plans the way (its own navmesh planner, which knows walls, slopes, stairs, city levels, lifts, flights, boats
+-- and zeppelins, on both continents) and leads along it; Pathy shows it with its arrow and dots. Pathy has no
+-- route logic of its own: no walked spots, no Pathfinder routes, no QuestTrail lines. Guidelime Pathfinder is
+-- still loaded, but only as the engine that draws and follows the line (its marker, its ground heights): the
+-- route it plans for itself is thrown away every moment, and when BV has no route the arrow says so and shows
+-- nothing else.
+--
+-- How it works: BV keeps its plan in BVAddonSuiteCore.Routing.Navigate (steps, the current step, the point you are
+-- up to on it). Pathy hands it the destination (Navigate:Start, as /bv route does) and copies the points of the
+-- walking leg you are on, with their heights, as the route to draw. BV does the leading: it moves to the next step,
+-- plans again when you leave the way, and takes lifts, flights and rides into account. Pathy only reads its state.
+--
+-- Needs BV Core, Map Data and Routing (CurseForge: "BV Addon Suite").
+
+local ADDON, ns = ...
+local PF = GuidelimePathfinder
+local floor, max = math.floor, math.max
+
+local BV = {}
+ns.BV = BV
+local st = { startAt = -100, suppressed = 0 }
+
+local function routing()
+	local core = rawget(_G, "BVAddonSuiteCore")
+	local R = core and core.Routing
+	return R and R.ready and R or nil
+end
+
+local function safe(fn, ...)
+	local ok, a, b, c = pcall(fn, ...)
+	if ok then return a, b, c end
+end
+ns.routing, ns.safe = routing, safe -- (for HUD.lua)
+
+-- BV's chat messages: every BV addon speaks through one function (BVAddonSuiteCore:Print), so one stand-in for it
+-- silences them all. They are still in BV's own log (what Routing:Print always writes first), in /pathy bv and in
+-- the HUD. Looked at every moment, so the setting takes effect at once, and BV's messages at login are caught too
+-- (this file loads before they are said).
+local realPrint
+local function silenceBV()
+	local core = rawget(_G, "BVAddonSuiteCore")
+	if not (core and type(core.Print) == "function") then return end
+	if ns.cfg("silenceBV") then
+		if not realPrint then
+			realPrint = core.Print
+			core.Print = function() end
+		end
+	elseif realPrint then
+		core.Print = realPrint
+		realPrint = nil
+	end
+end
+silenceBV()
+
+-- Your height, from BV's own measurement (the NPCs near you, by the game's range checks): the middle of its band
+-- when the band is narrow, else nil
+local function heightNow()
+	local R = routing()
+	local H = R and R.Height
+	if not (H and H.Now and H.Span) then return end
+	local m = safe(H.Now, H)
+	local span, lo, hi = H.Span(m and m.set)
+	if span and span <= ((R.Hpa and R.Hpa.ZSPAN) or 6) then return (lo + hi) / 2 end
+end
+
+-- BV's goal for a place: the place as a point of its own map, then of its continent, as BV does for
+-- "/bv route <x> <y>"
+local CONT_MAP = { [0] = 1415, [1] = 1414 } -- a continent's own map, for a place with no map of its own
+local function makeGoal(R, t)
+	local H = ns.HBD()
+	-- the place's own map first (it may be on another continent than you), never the map you stand in for it
+	local map = t.uiMap or CONT_MAP[t.instance]
+	if not map then return end
+	local mx, my = H:GetZoneCoordinatesFromWorld(t.x, t.y, map, true)
+	if not mx then return end
+	local cont, cx, cy = R:OnContinent(map, mx, my)
+	if not cont then return end
+	return { cont = cont, x = cx, y = cy, name = t.name or "destination", label = "Pathy's destination" }
+end
+
+-- Which of several places BV reaches soonest (its own estimate: walking, flights, boats, zeppelins, lifts; other
+-- continents too): cb(place), or cb(false) when BV finds no way to any of them. Worked out in BV's scheduler, a few
+-- milliseconds a frame, so the game does not stop for it.
+function BV.choose(spots, cb)
+	local R = routing()
+	local N = R and R.Navigate
+	if not N then
+		ns.Print("BV Addon Suite - Routing is not loaded, so nothing can be planned (install BV Core, Map Data and Routing, and restart the game).")
+		return cb(false)
+	end
+	if #spots == 1 then return cb(spots[1]) end
+	local list, index = {}, {}
+	for i, s in ipairs(spots) do
+		local g = makeGoal(R, s)
+		if g then
+			list[#list + 1] = g
+			index[#list] = i
+		end
+	end
+	local cont, cx, cy, level = N:Here()
+	if #list == 0 or not cont then return cb(spots[1]) end -- cannot estimate: the first; BV says if it cannot reach it
+	local ok = pcall(R.Scheduler.Run, function() return N:EstimateMany({ cont = cont, x = cx, y = cy, level = level }, list) end,
+		function(times)
+			local best, bestT
+			for k = 1, #list do
+				local tt = type(times) == "table" and times[k]
+				if tt and (not bestT or tt < bestT) then best, bestT = spots[index[k]], tt end
+			end
+			cb(best or false)
+		end, false)
+	if not ok then cb(spots[1]) end
+end
+
+-- the heights of a route's corners, the unknown ones from the nearest known (nil when none is known)
+local function fillZ(zs, n)
+	local any = false
+	for i = 1, n do
+		if zs[i] then any = true break end
+	end
+	if not any then return nil end
+	local prev
+	for i = 1, n do
+		if zs[i] then prev = zs[i] elseif prev then zs[i] = prev end
+	end
+	local nextz
+	for i = n, 1, -1 do
+		if zs[i] then nextz = zs[i] elseif nextz then zs[i] = nextz end
+	end
+	return zs
+end
+
+-- the walking leg you are on, from the point BV says you are up to, as a Pathy route (world coordinates, heights)
+local function applyWalk(N, step, px, py)
+	local H = ns.HBD()
+	local cont, pts = step.from.cont, step.path
+	local xs, ys, zs = { px }, { py }, { heightNow() or false }
+	for j = max(1, N.ahead or 1), #pts do
+		local x, y = H:GetWorldCoordinatesFromZone(pts[j][1], pts[j][2], cont)
+		if x then xs[#xs + 1], ys[#ys + 1], zs[#zs + 1] = x, y, pts[j].z or false end
+	end
+	local ex, ey = H:GetWorldCoordinatesFromZone(step.to.x, step.to.y, step.to.cont)
+	if ex and ns.dist(xs[#xs], ys[#ys], ex, ey) > 1 then xs[#xs + 1], ys[#ys + 1], zs[#zs + 1] = ex, ey, step.to.z or false end
+	if #xs < 2 then return false end
+	PF.SetPath({ x = xs, y = ys, z = fillZ(zs, #xs), n = #xs, walked = true, bv = true }, false)
+	st.path = PF.path
+	return true
+end
+
+-- one line saying what BV is doing, for the window and the arrow
+local function describe(R, N, t)
+	if not N.steps then
+		if N.busy then return "BV is calculating the way..." end
+		local last = R.log and R.log[#R.log]
+		if st.sawSteps then return "BV's route has ended" end
+		return "BV has no route to " .. (t.name or "here") .. (last and (" - " .. last:gsub("^%d+:%d+:%d+%s+", "")) or "")
+	end
+	local step = N.steps[N.current]
+	if not step then return "BV: no current step" end
+	local left
+	if step.kind == "walk" and type(step.path) == "table" then left = step.yards end
+	local say = safe(N.Say, N, step, left) or step.kind
+	local total = N.seconds and safe(N.Clock, N.seconds)
+	return string.format("BV route: step %d of %d - %s%s", N.current or 0, #N.steps, say, total and (" (about " .. total .. " in all)") or "")
+end
+
+-- Pathfinder plans a route of its own for the target it is handed (it draws and follows the line, so it has to
+-- be handed one): it is never shown, taken away as soon as it appears
+local function suppress()
+	local p = PF.path
+	if p and not p.bv then
+		safe(PF.Pause)
+		st.suppressed = st.suppressed + 1
+	end
+end
+
+-- The guide panel ---------------------------------------------------------------------------------------------
+-- BV's own guide window (a medallion with a flat arrow, what to do now, what comes next, the time left) is hidden
+-- through its own setting while Pathy guides, and given back afterwards; this panel says the same things, under
+-- Pathy's smoothed 3D arrow, from BV's own functions (Navigate:Parts, :Say, :SecondsLeft). Move the arrow (settings,
+-- "Drag to move") and the panel goes with it.
+local panel
+local PANEL_W, PANEL_H = 270, 98
+
+local function buildPanel()
+	local f = CreateFrame("Frame", "PathyGuide", UIParent, "BackdropTemplate")
+	f:SetSize(PANEL_W, PANEL_H)
+	f:SetFrameStrata("LOW") -- under the game's windows, like the arrow
+	f:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+	local function line(template, point, x, y, width, justify)
+		local fs = f:CreateFontString(nil, "OVERLAY", template)
+		fs:SetPoint(point, x, y)
+		if width then fs:SetWidth(width) end
+		fs:SetJustifyH(justify or "LEFT")
+		fs:SetWordWrap(false)
+		return fs
+	end
+	f.head = line("GameFontNormalSmall", "TOPLEFT", 10, -8, PANEL_W - 70)
+	f.count = line("GameFontHighlightSmall", "TOPRIGHT", -10, -8, 50, "RIGHT")
+	f.now = line("GameFontNormalLarge", "TOPLEFT", 10, -23, PANEL_W - 20)
+	f.target = line("GameFontHighlight", "TOPLEFT", 10, -47, PANEL_W - 20)
+	f.next = line("GameFontDisableSmall", "TOPLEFT", 10, -64, PANEL_W - 20)
+	f.level = line("GameFontDisableSmall", "BOTTOMLEFT", 10, 8, PANEL_W - 90)
+	f.time = line("GameFontHighlightSmall", "BOTTOMRIGHT", -10, 8, 80, "RIGHT")
+	f:Hide()
+	return f
+end
+
+-- what the panel says, from BV's state (the same things BV's own guide says)
+local function content(R, N, t)
+	local level = safe(function() return R.Level:Name(R.Level:Current()) end)
+	local goal = (N.goal and N.goal.name) or t.name or "?"
+	if not N.steps then
+		if N.busy then return "FINDING THE WAY", "", goal, "", "", level, "" end
+		return "NO ROUTE", "", ns.bvText or "BV has no route", "", "", level, ""
+	end
+	local i = N.current or 1
+	local step = N.steps[i]
+	if not step then return "NO ROUTE", "", "BV: no current step", "", "", level, "" end
+	local parts = safe(N.Parts, N, step) or {}
+	local head = tostring(parts.head or step.kind or ""):upper()
+	local count = #N.steps > 1 and string.format("%d/%d", i, #N.steps) or ""
+	local now, target
+	if step.kind == "walk" then
+		local yards = N.left or step.yards
+		now = yards and (floor(yards + 0.5) .. " yd") or "Walk"
+		target = parts.target or ""
+	elseif step.kind == "flight" then
+		now, target = "Fly " .. (parts.target or ""), "Talk to the flight master. Wait here until you land."
+	elseif step.kind == "transport" then
+		now = (parts.verb or "Ride") .. " " .. (parts.target or "")
+		target = (R.Timetable and safe(R.Timetable.GuideText, R.Timetable, step)) or "Wait for it here and ride along until you are there."
+	else
+		now = parts.verb or "Go"
+		target = parts.name and (parts.name .. "  -  " .. (parts.target or "")) or (parts.target or "")
+	end
+	local after = N.steps[i + 1]
+	-- what comes after; on the last step nothing does, and "there: <destination>" would only repeat the line above
+	-- when that already names it
+	local nextText
+	if after then
+		nextText = "then: " .. (safe(N.Say, N, after, nil, true) or "")
+	elseif target:find(goal, 1, true) or now:find(goal, 1, true) then
+		nextText = ""
+	else
+		nextText = "there: " .. goal
+	end
+	local secs = safe(N.SecondsLeft, N)
+	return head, count, now, target, nextText, level, secs and (safe(N.Clock, secs) or "") or ""
+end
+
+local function paintPanel(R, N, t)
+	panel = panel or buildPanel()
+	local f = panel
+	-- under the arrow's own text (the up/down hint and the yards), wherever the player put that
+	local tx, ty = ns.cfg("textX") * UIParent:GetWidth(), ns.cfg("textY") * UIParent:GetHeight()
+	f:ClearAllPoints()
+	f:SetPoint("TOP", UIParent, "BOTTOMLEFT", tx, ty - 40)
+	local a = ns.cfg("windowAlpha")
+	f:SetBackdropColor(0.05, 0.05, 0.08, a)
+	f:SetBackdropBorderColor(1, 1, 1, a)
+	local head, count, now, target, nextText, level, time = content(R, N, t)
+	f.head:SetText(head)
+	f.count:SetText(count)
+	f.now:SetText(now)
+	f.target:SetText(target)
+	f.next:SetText(nextText)
+	f.level:SetText(level and ("on " .. level) or "")
+	f.time:SetText(time)
+	f:Show()
+end
+
+-- BV's own guide: hidden while Pathy guides (its own "Hide the guide" setting), what it was put back afterwards
+-- (also after a reload or a crash in between: what it was is kept)
+local function manageBVGuide(R, hide)
+	local G = R and R.Guide
+	if not (G and G.SetSide and R.Config) then return end
+	local c = safe(R.Config, R)
+	if not c then return end
+	if hide then
+		if c.guide ~= "off" then
+			PathyDB.bvGuideWas = c.guide
+			safe(G.SetSide, G, "off")
+		end
+	elseif PathyDB.bvGuideWas then
+		if c.guide == "off" then safe(G.SetSide, G, PathyDB.bvGuideWas) end
+		PathyDB.bvGuideWas = nil
+	end
+end
+
+-- the settings changed (the panel's, BV's window's)
+function BV.refresh()
+	silenceBV()
+	manageBVGuide(routing(), ns.getTarget() ~= nil and ns.cfg("hideBVGuide"))
+	if panel and not ns.cfg("guidePanel") then panel:Hide() end
+	if not ns.cfg("guidePanel") and ns.HUD then ns.HUD.hide() end
+end
+
+local function route(now)
+	local t = ns.getTarget()
+	local R = routing()
+	local N = R and R.Navigate
+	silenceBV()
+	manageBVGuide(R, t ~= nil and ns.cfg("hideBVGuide"))
+	-- the way ended by hand (the HUD's button, /bv route stop) stays ended: not planned again behind your back
+	if N and not st.stopWrapped then
+		st.stopWrapped = true
+		local original = N.Stop
+		N.Stop = function(self, quiet, ...)
+			if not quiet then st.stoppedByUser = true end
+			return original(self, quiet, ...)
+		end
+	end
+	if not t then
+		if N and st.goal then safe(N.Stop, N, true) end
+		st.goal, st.key, st.sawSteps, st.path = nil, nil, nil, nil
+		ns.bvText = nil
+		return
+	end
+	if not N then
+		ns.bvText = "BV Addon Suite - Routing is not loaded: install BV Core, Map Data and Routing and restart the game"
+		return suppress()
+	end
+	local px, py = ns.HBD():GetPlayerWorldPosition()
+	if not px then
+		ns.bvText = "the game gives no position here"
+		return suppress()
+	end
+	local key = t.instance .. ":" .. floor(t.x) .. ":" .. floor(t.y)
+	-- a new destination: BV plans it
+	if key ~= st.key then
+		if N.busy then
+			ns.bvText = "BV is still busy with the last route..."
+			return suppress()
+		end
+		local goal = makeGoal(R, t)
+		if not goal then
+			ns.bvText = "BV cannot place this destination on a continent map"
+			return suppress()
+		end
+		st.key, st.goal, st.startAt, st.sawSteps, st.suppressed, st.stoppedByUser = key, goal, now, nil, 0, nil
+		local ok, err = pcall(N.Start, N, goal)
+		if not ok then
+			st.goal = nil
+			ns.bvText = "BV error: " .. tostring(err)
+		end
+		return suppress()
+	end
+	-- BV dropped its route (stopped, or ended) while you still have a destination far away: plan it again, not
+	-- more than once in 10 seconds, and never when BV said it has no way (nothing was ever planned)
+	if st.goal and N.goal ~= st.goal and not N.busy and st.sawSteps and not st.stoppedByUser and ns.dist(px, py, t.x, t.y) > 25 and now - st.startAt > 10 then
+		st.startAt = now
+		st.sawSteps = nil
+		safe(N.Start, N, st.goal)
+		return suppress()
+	end
+	if N.steps and N.goal == st.goal then st.sawSteps = true end
+	ns.bvText = describe(R, N, t)
+	local step = N.steps and N.goal == st.goal and N.steps[N.current]
+	if step and step.kind == "walk" and type(step.path) == "table" and #step.path >= 2 then
+		-- the leg you walk: what changed since the route was drawn (another step, further along it, or another
+		-- route put there)
+		if st.sigSteps ~= N.steps or st.sigCurrent ~= N.current or st.sigAhead ~= N.ahead or PF.path ~= st.path then
+			if applyWalk(N, step, px, py) then
+				st.sigSteps, st.sigCurrent, st.sigAhead = N.steps, N.current, N.ahead
+			end
+		end
+	elseif step then
+		-- a lift, a flight, a ride: nothing to draw, the line says what to do
+		st.sigSteps, st.path = nil, nil
+		if PF.path then safe(PF.Pause) end
+	end
+	suppress()
+end
+
+local function tick(now)
+	route(now)
+	local t = ns.getTarget()
+	local R = routing()
+	local N = R and R.Navigate
+	if t and N and ns.cfg("guidePanel") then
+		-- the HUD (BV's own guide window, built by BV's own code, HUD.lua); the plain panel only if that cannot be
+		if ns.HUD and ns.HUD.paint(R, N, t) then
+			if panel then panel:Hide() end
+		else
+			paintPanel(R, N, t)
+		end
+	else
+		if panel then panel:Hide() end
+		if ns.HUD then ns.HUD.hide() end
+	end
+end
+
+local driver = CreateFrame("Frame")
+local acc = 0
+driver:SetScript("OnUpdate", function(_, dt)
+	acc = acc + dt
+	if acc < 0.15 then return end
+	acc = 0
+	if not (PathyDB and ns.HBD and ns.HBD()) then return end
+	local ok, err = pcall(tick, GetTime())
+	if not ok and not st.err then
+		st.err = err
+		ns.Print("|cffff4040BV routing error:|r " .. tostring(err))
+	end
+end)
+
+-- /pathy bv: what BV planned and what Pathy did with it
+function BV.report()
+	local P = ns.Print
+	local R = routing()
+	P("BV Routing: " .. (R and "loaded" or "|cffff4040not loaded|r (install BV Core, Map Data and Routing, then restart the game)"))
+	if not R then return end
+	local N = R.Navigate
+	local t = ns.getTarget()
+	P("destination: " .. (t and (t.name or "?") or "none (pick a quest or NPC in Pathy)"))
+	P("BV's state: " .. (N.busy and "calculating" or N.steps and "has a route" or "no route"))
+	local level = safe(function() return R.Level:Name(R.Level:Current()) end)
+	local z = heightNow()
+	P(string.format("you are on BV's level: %s; BV's height measurement: %s", tostring(level or "unknown"), z and string.format("%.1f yd", z) or "none (too few NPCs near)"))
+	if N.steps then
+		P(string.format("plan: %d steps, about %s in all", #N.steps, N.seconds and safe(N.Clock, N.seconds) or "?"))
+		for i, step in ipairs(N.steps) do
+			local say = safe(N.Say, N, step, step.kind == "walk" and step.yards or nil) or step.kind
+			P(string.format("  %s%d. %s%s", i == N.current and "> " or "  ", i, say,
+				step.kind == "walk" and string.format("  [%s, %d yd, %d points]", tostring(step.status or "ok"), floor(step.yards or 0), type(step.path) == "table" and #step.path or 0) or ""))
+		end
+	end
+	local p = PF.path
+	P(string.format("Pathy is drawing: %s; Pathfinder's own route was thrown away %d times", p and (p.bv and ("BV's leg (" .. p.n .. " points, " .. (p.z and "with heights" or "no heights") .. ")") or "something that is NOT BV's") or "nothing", st.suppressed))
+	for i = max(1, #(R.log or {}) - 4), #(R.log or {}) do P("  BV log: " .. R.log[i]) end
+end

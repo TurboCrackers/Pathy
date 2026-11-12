@@ -1,10 +1,12 @@
 ## Interface: 16001
 ## Title: Pathy
-## Notes: Pick a quest giver or turn-in and follow ground dots there along the real walkable path (caves and levels included). Uses Guidelime Pathfinder's dots and Questie's WoW: Forever database.
+## Notes: Pick a quest giver or turn-in and follow an arrow and ground dots there along the route BV Addon Suite - Routing plans (walls, stairs, lifts, boats and zeppelins included). Uses Questie's WoW: Forever database for the places.
 ## Author: lil bub
 ## Version: 1.1.0
-## Dependencies: Guidelime_Pathfinder, Questie
+## Dependencies: Guidelime_Pathfinder, Questie, BVAddonSuite_Routing
 ## OptionalDeps: WaypointTracker
 ## SavedVariables: PathyDB
 
 Pathy.lua
+BV.lua
+HUD.lua
