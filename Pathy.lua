@@ -631,31 +631,35 @@ local VENDOR_TYPES = { Food = true, Drink = true, Bags = true, Potions = true, [
 	Poisons = true, Ammo = true, ["Pet Food"] = true, Repair = true }
 local function iconFor(key) return ICONS[key] or ICONS.npc end
 
--- one row of buttons under the title, each with its icon
-local toolButtons = {}
-local function toolButton(text, icon, x, fn)
-	local b = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-	b:SetSize(80, 24)
-	b:SetPoint("TOPLEFT", x, -54)
-	b:SetText("     " .. text)
+-- Two small icon buttons at the top, beside the X: settings (a cog) and stop. Icons only; the words are in tooltips.
+local function iconButton(icon, x, tip, fn, crop)
+	local b = CreateFrame("Button", nil, content)
+	b:SetSize(20, 20)
+	b:SetPoint("TOPRIGHT", x, -7)
+	b:SetNormalTexture(icon)
+	b:SetHighlightTexture(icon, "ADD")
+	if crop then
+		b:GetNormalTexture():SetTexCoord(0.08, 0.92, 0.08, 0.92)
+		b:GetHighlightTexture():SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	end
+	b:GetNormalTexture():SetAlpha(0.85)
 	b:SetScript("OnClick", fn)
-	local t = b:CreateTexture(nil, "OVERLAY")
-	t:SetSize(14, 14)
-	t:SetPoint("LEFT", 7, 0)
-	t:SetTexture(icon)
-	toolButtons[#toolButtons + 1] = b
+	b:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+		GameTooltip:SetText(tip)
+		GameTooltip:Show()
+	end)
+	b:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	return b
 end
-toolButton("Map pin", ICONS.pin, 12, function() goPin() end)
-toolButton("Target", ICONS.target, 95, function() goTargetNpc() end)
-toolButton("Settings", ICONS.settings, 178, function() PathySettings:SetShown(not PathySettings:IsShown()) end)
-toolButton("Stop", ICONS.stop, 261, function() if target then stop("stopped") else Print("not guiding anywhere") end end)
+iconButton(ICONS.settings, -38, "Settings", function() PathySettings:SetShown(not PathySettings:IsShown()) end, true)
+iconButton(ICONS.stop, -62, "Stop guiding", function() if target then stop("stopped") else Print("not guiding anywhere") end end)
 
 -- the search box: filters every section, by its heading too
 local search = CreateFrame("EditBox", "PathySearchBox", content, "InputBoxTemplate")
 search:SetHeight(20)
-search:SetPoint("TOPLEFT", 20, -86)
-search:SetPoint("TOPRIGHT", -20, -86)
+search:SetPoint("TOPLEFT", 20, -58)
+search:SetPoint("TOPRIGHT", -20, -58)
 search:SetAutoFocus(false)
 search:SetMaxLetters(60)
 search.hint = search:CreateFontString(nil, "OVERLAY", "GameFontDisable")
@@ -667,7 +671,7 @@ search.clear:SetPoint("RIGHT", 2, 0)
 search.clear:Hide()
 
 local scroll = CreateFrame("ScrollFrame", nil, content, "UIPanelScrollFrameTemplate")
-scroll:SetPoint("TOPLEFT", 10, -140)
+scroll:SetPoint("TOPLEFT", 10, -112)
 scroll:SetPoint("BOTTOMRIGHT", -30, 22)
 local child = CreateFrame("Frame", nil, scroll)
 child:SetSize(316, 10)
@@ -689,7 +693,7 @@ for i, tab in ipairs(TABS) do
 	b.key = tab[1]
 	-- three equal buttons across the window
 	local gap = 4
-	b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * 2, -112)
+	b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * 2, -84)
 	b:SetScript("OnClick", function()
 		PathyDB.tab = tab[1]
 		scroll:SetVerticalScroll(0)
@@ -699,19 +703,11 @@ for i, tab in ipairs(TABS) do
 end
 local function layoutTabs()
 	local total = f:GetWidth() / cfg("uiScale") - 24
-	-- the toolbar buttons share the width too, so the window can be made as narrow as you like
-	local tw = (total - 3 * 4) / math.max(1, #toolButtons)
-	for i, b in ipairs(toolButtons) do
-		b:SetWidth(math.max(8, tw))
-		b:ClearAllPoints()
-		b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * (tw + 4), -54)
-		b:SetShown(tw >= 20)
-	end
 	local w = (total - 8) / 3
 	for i, b in ipairs(tabButtons) do
 		b:SetWidth(w)
 		b:ClearAllPoints()
-		b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * (w + 4), -112)
+		b:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + (i - 1) * (w + 4), -84)
 	end
 end
 f:HookScript("OnSizeChanged", layoutTabs)
