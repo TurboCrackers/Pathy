@@ -20,7 +20,7 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
 	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
-	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false,
+	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false, simpleUI = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
 	windowAlpha = 0.92, uiScale = 1, minimapButton = true, followTracked = true,
 }
@@ -1679,8 +1679,8 @@ driver:SetScript("OnUpdate", function(_, dt)
 
 	local ax, ay, hudSize, hudColour = arrowSpot()
 	if ax == false then return hideArrowShape() end -- the HUD shows a symbol in the medallion
-	if hudSize and not arrow:IsShown() then arrow:Show() end -- the HUD's arrow does not depend on the arrow setting
-	if not hudSize and not cfg("arrow") then
+	if (hudSize or cfg("simpleUI")) and not arrow:IsShown() then arrow:Show() end -- the HUD's arrow, and the simple UI's, do not depend on the arrow setting
+	if not hudSize and not cfg("arrow") and not cfg("simpleUI") then
 		if arrow:IsShown() then arrow:Hide(); hideArrowShape() end
 		return
 	end
@@ -1694,6 +1694,11 @@ driver:SetScript("OnUpdate", function(_, dt)
 			-- in the HUD's medallion: the HUD says the yards and what to do, the arrow's own tilt shows up and down
 			arrow.climb:SetText("")
 			arrow.dist:SetText("")
+		elseif cfg("simpleUI") then
+			-- the simple UI: what to do now (and whether it is up or down), and where to, under the arrow
+			local hint = (climb and climb > CLIMB and "  ^ up") or (climb and climb < -CLIMB and "  v down") or ""
+			arrow.climb:SetText((ns.simpleNow or "") .. hint)
+			arrow.dist:SetText(ns.simpleTarget or "")
 		elseif cfg("arrowText") then
 			if climb and climb > CLIMB then
 				arrow.climb:SetText("^ up")
@@ -1711,7 +1716,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 	elseif target and not handle:IsShown() then
 		hideArrowShape()
 		local why = noRouteText()
-		if why and not hudSize then
+		if why and not hudSize and not (ns.ended and ns.ended()) then
 			arrow.climb:ClearAllPoints()
 			arrow.climb:SetPoint("TOP", UIParent, "BOTTOMLEFT", ax, ay)
 			arrow.climb:SetText("|cffff9933Pathy: " .. why .. "|r")
@@ -1841,7 +1846,7 @@ function applied(key)
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
-	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton") and ns.BV then ns.BV.refresh() end
+	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI") and ns.BV then ns.BV.refresh() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
 end
@@ -1987,10 +1992,11 @@ header(S, "Questie", R, -102)
 checkbox(S, "followTracked", "Guide to the quest I focus in Questie's tracker", R, -120)
 slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", R + 4, -156, 1, 120, 1, "%d yd")
 header(S, "HUD", R, -216)
-checkbox(S, "guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)", R, -234)
-checkbox(S, "hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)", R, -270)
-checkbox(S, "silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)", R, -306)
-checkbox(S, "showLogButton", "Show the log button on the HUD (what the route planner did for this way)", R, -342)
+checkbox(S, "simpleUI", "Simple path UI: only the arrow, with the instructions under it (no HUD)", R, -234)
+checkbox(S, "guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)", R, -270)
+checkbox(S, "hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)", R, -306)
+checkbox(S, "silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)", R, -342)
+checkbox(S, "showLogButton", "Show the log button on the HUD (what the route planner did for this way)", R, -378)
 
 header(S, "Text under the arrow", L, -372)
 slider(S, "textAlpha", "Opacity", L + 4, -392, 0.05, 1, 0.05, "%d%%", 100)
