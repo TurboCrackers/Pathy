@@ -482,13 +482,13 @@ local function tick(now)
 	local R = routing()
 	local N = R and R.Navigate
 	-- for the simple UI (just the arrow, with the instructions under it): what to do now, and where to
-	if t and N and not st.ended and ns.cfg("simpleUI") then
+	if t and N and not st.ended and ns.cfg("arrow") then
 		local _, _, now, target = content(R, N, t)
 		ns.simpleNow, ns.simpleTarget = now, target
 	else
 		ns.simpleNow, ns.simpleTarget = nil, nil
 	end
-	if t and N and ns.cfg("guidePanel") and not st.ended and not ns.cfg("simpleUI") then
+	if t and N and ns.cfg("guidePanel") and not st.ended then
 		-- the HUD (BV's own guide window, built by BV's own code, HUD.lua); the plain panel only if that cannot be
 		if ns.HUD and ns.HUD.paint(R, N, t) then
 			if panel then panel:Hide() end

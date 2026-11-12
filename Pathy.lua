@@ -19,8 +19,8 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 -- Settings (PathyDB holds only what was changed; /pathy config opens the window)
 local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
-	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
-	guidePanel = true, silenceBV = true, showLogButton = false, simpleUI = false,
+	arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
+	guidePanel = true, silenceBV = true, showLogButton = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
 	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, hudLocked = false, uiScale = 1, minimapButton = true, followTracked = true,
 }
@@ -1656,8 +1656,8 @@ driver:SetScript("OnUpdate", function(_, dt)
 
 	local ax, ay, hudSize, hudColour = arrowSpot()
 	if ax == false then return hideArrowShape() end -- the HUD shows a symbol in the medallion
-	if (hudSize or cfg("simpleUI")) and not arrow:IsShown() then arrow:Show() end -- the HUD's arrow, and the simple UI's, do not depend on the arrow setting
-	if not hudSize and not cfg("arrow") and not cfg("simpleUI") then
+	if (hudSize or cfg("arrow")) and not arrow:IsShown() then arrow:Show() end -- the HUD's arrow does not depend on the simple arrow setting
+	if not hudSize and not cfg("arrow") then
 		if arrow:IsShown() then arrow:Hide(); hideArrowShape() end
 		return
 	end
@@ -1671,24 +1671,11 @@ driver:SetScript("OnUpdate", function(_, dt)
 			-- in the HUD's medallion: the HUD says the yards and what to do, the arrow's own tilt shows up and down
 			arrow.climb:SetText("")
 			arrow.dist:SetText("")
-		elseif cfg("simpleUI") then
-			-- the simple UI: what to do now (and whether it is up or down), and where to, under the arrow
+		else
+			-- the simple arrow: what to do now (and whether it is up or down), and where to, under the arrow
 			local hint = (climb and climb > CLIMB and "  ^ up") or (climb and climb < -CLIMB and "  v down") or ""
 			arrow.climb:SetText((ns.simpleNow or "") .. hint)
 			arrow.dist:SetText(ns.simpleTarget or "")
-		elseif cfg("arrowText") then
-			if climb and climb > CLIMB then
-				arrow.climb:SetText("^ up")
-			elseif climb and climb < -CLIMB then
-				arrow.climb:SetText("v down")
-			else
-				arrow.climb:SetText("")
-			end
-			local rem = route and route.remaining
-			arrow.dist:SetText(rem and format("%d yd", floor(rem + 0.5)) or "")
-		else
-			arrow.climb:SetText("")
-			arrow.dist:SetText("")
 		end
 	elseif target and not handle:IsShown() then
 		hideArrowShape()
@@ -1704,7 +1691,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 		local okA, err = pcall(renderArrow, ax, ay, 0, 1, 0)
 		if not okA then report(err) end
 		arrow.climb:SetText("|cff888888(preview: Pathy is not guiding)|r")
-		arrow.dist:SetText(cfg("arrowText") and "^ up  42 yd" or "")
+		arrow.dist:SetText("^ up  42 yd")
 	else
 		hideArrowShape()
 	end
@@ -1824,7 +1811,7 @@ function applied(key)
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" or key == "windowColour" or key == "windowBorder" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
-	if (key == "guidePanel" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI" or key == "hudScale" or key == "hudAlpha" or key == "hudLocked" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
+	if (key == "guidePanel" or key == "silenceBV" or key == "showLogButton" or key == "hudScale" or key == "hudAlpha" or key == "hudLocked" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
 end
@@ -2016,7 +2003,7 @@ local function buildSettings(content)
 	end
 
 	local g = section("General")
-	g.check("simpleUI", "Simple path UI: only the arrow, with the instructions under it (no HUD)")
+	g.check("arrow", "Enable the simple guide arrow (the arrow with the instructions under it, on its own)")
 	g.check("minimapButton", "Pathy button on the minimap")
 	g.check("followTracked", "Guide to the quest I focus in Questie's tracker")
 	g.slider("arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", 1, 120, 1, "%d yd")
@@ -2038,7 +2025,7 @@ local function buildSettings(content)
 		refreshSettings()
 	end })
 
-	local h = section("Detailed Widget Settings")
+	local h = section("HUD Settings")
 	h.check("guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)")
 	h.check("hudLocked", "Lock the HUD's position (the padlock on the HUD does the same)")
 	h.slider("hudScale", "HUD size", 0.5, 2, 0.05, "%d%%", 100)
@@ -2056,13 +2043,11 @@ local function buildSettings(content)
 		refreshSettings()
 	end })
 
-	local w = section("Simple Widget Settings")
-	w.check("arrow", "Show the arrow")
+	local w = section("Simple Arrow Settings")
 	w.slider("arrowSize", "Arrow size", 0.2, 2, 0.05, "%d%%", 100)
 	w.slider("arrowAlpha", "Arrow opacity", 0.05, 1, 0.05, "%d%%", 100)
 	w.swatch("arrowColour", "Arrow color")
 	w.check("arrowDirColour", "Color by direction (green ahead, red behind)")
-	w.check("arrowText", "Show up / down and the distance under it")
 	w.slider("arrowX", "Arrow: across the screen", 0, 1, 0.01, "%d%%", 100)
 	w.slider("arrowY", "Arrow: up the screen", 0, 1, 0.01, "%d%%", 100)
 	w.buttons({ "Drag to move", 130, function()
@@ -2282,7 +2267,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 	if event == "ADDON_LOADED" and arg1 == ADDON then
 		PathyDB = PathyDB or {}
 		-- what earlier versions kept for routes of their own (walked spots, flight paths, NPC heights, their switches): gone
-		for _, k in ipairs({ "walk", "walk2", "walk3", "walkCell", "npcZ", "taxi", "mountSpeed", "recordWalk", "useWalked", "recordOthers", "useGrid", "gridOnly", "useGolden", "refine", "bvOnly", "restore", "savedPin", "hideBVGuide" }) do PathyDB[k] = nil end
+		for _, k in ipairs({ "walk", "walk2", "walk3", "walkCell", "npcZ", "taxi", "mountSpeed", "recordWalk", "useWalked", "recordOthers", "useGrid", "gridOnly", "useGolden", "refine", "bvOnly", "restore", "savedPin", "hideBVGuide", "simpleUI", "arrowText" }) do PathyDB[k] = nil end
 		PathyDB.arrowPos, PathyDB.fixedDots, PathyDB.arrowScale, PathyDB.tilt = nil, nil, nil, nil -- from older versions
 		if type(PathyDB.textX) == "number" and (PathyDB.textX < 0 or PathyDB.textX > 1) then PathyDB.textX = nil end
 		if type(PathyDB.textY) == "number" and (PathyDB.textY < 0 or PathyDB.textY > 1) then PathyDB.textY = nil end
