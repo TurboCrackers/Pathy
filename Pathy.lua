@@ -2169,6 +2169,7 @@ end -- the settings window
 -- The quest you focus in Questie's tracker (its focus button sets the game's super-tracked quest) or send to
 -- TomTom from it: Pathy guides you there. An in-progress quest goes to its area or objective, a finished one to
 -- its turn-in, one not taken yet to its giver.
+local quietUntil, lastSuper = 0 -- the game re-announces the focused quest after a death or a loading screen: not a choice of yours
 local followReady = false -- not before a moment after login: the game reports the focused quest as it loads
 local function guideToQuest(questId)
 	questId = tonumber(questId)
@@ -2279,6 +2280,9 @@ events:RegisterEvent("QUEST_ACCEPTED")
 events:RegisterEvent("QUEST_REMOVED")
 events:RegisterEvent("PLAYER_LEVEL_UP")
 events:RegisterEvent("SUPER_TRACKING_CHANGED")
+events:RegisterEvent("PLAYER_ALIVE")
+events:RegisterEvent("PLAYER_UNGHOST")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("GROUP_ROSTER_UPDATE")
 events:RegisterEvent("FRIENDLIST_UPDATE")
 local pendingRefresh
@@ -2344,9 +2348,13 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 				if target and target.questId == arg1 then stop("the quest left your log: stopped") end
 			end)
 		end
+	elseif event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" or event == "PLAYER_ENTERING_WORLD" then
+		quietUntil = GetTime() + 8
 	elseif event == "SUPER_TRACKING_CHANGED" then
 		local id = C_SuperTrack and C_SuperTrack.GetSuperTrackedQuestID and C_SuperTrack.GetSuperTrackedQuestID()
-		if id and id ~= 0 then pcall(guideToQuest, id) end
+		-- only a quest you newly focus, not the same one announced again (after a respawn, say) and not right after one
+		if id and id ~= 0 and id ~= lastSuper and GetTime() > quietUntil then pcall(guideToQuest, id) end
+		lastSuper = id or 0
 	elseif event == "QUEST_LOG_UPDATE" then
 		if target and target.kind == "objective" and target.questId then
 			for _, q in ipairs(questLog()) do
