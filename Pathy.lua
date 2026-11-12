@@ -18,11 +18,11 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 
 -- Settings (PathyDB holds only what was changed; /pathy config opens the window)
 local DEFAULTS = {
-	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
+	arrow = false, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
 	arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
 	guidePanel = true, silenceBV = true, showLogButton = false, showMapLine = true,
-	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
-	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, hudLocked = false, uiScale = 1, minimapButton = true, followTracked = true,
+	textAlpha = 0.8, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
+	windowAlpha = 0, windowColour = { 0.149, 0.098, 1 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, hudLocked = true, uiScale = 0.75, minimapButton = true, followTracked = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
