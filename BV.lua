@@ -16,7 +16,7 @@
 
 local ADDON, ns = ...
 local PF = GuidelimePathfinder
-local floor, max = math.floor, math.max
+local floor, max, min, abs = math.floor, math.max, math.min, math.abs
 
 local BV = {}
 ns.BV = BV
@@ -53,6 +53,18 @@ local function silenceBV()
 	end
 end
 silenceBV()
+
+-- Pathfinder follows what is on screen (its marker, its progress along the line), but must not plan: it would put a
+-- route of its own there, or clear the line when it has none, and the line would flash between the two. Its planning
+-- is turned off; all it keeps is a destination on your own continent, which its loop needs to go on following.
+if PF and PF.Plan then
+	PF.Plan = function()
+		local pl = PF.player
+		PF.dest = pl and pl.instance and { instance = pl.instance, x = pl.x, y = pl.y } or nil
+		PF.planning = false
+	end
+	PF.PlanTrip = function() PF.trip, PF.riding = nil, nil end
+end
 
 -- Your height, from BV's own measurement (the NPCs near you, by the game's range checks): the middle of its band
 -- when the band is narrow, else nil
@@ -131,7 +143,52 @@ local function fillZ(zs, n)
 	return zs
 end
 
--- the walking leg you are on, from the point BV says you are up to, as a Pathy route (world coordinates, heights)
+-- Douglas-Peucker: drops the points within tol yards of the line between their neighbours (a change of height
+-- counts, so a stair keeps its corners). BV's points lie a yard or two apart; Pathfinder's marker (the in-world pin
+-- the dots line up to) moves from corner to corner and is meant for a route of real bends, not of hundreds of
+-- points: with every point a corner it jumps all the time and the dots and the arrow flash.
+local function simplify(xs, ys, zs, tol)
+	local n = #xs
+	local keep = { [1] = true, [n] = true }
+	local stack, sp = { 1, n }, 2
+	while sp > 0 do
+		local j, i = stack[sp], stack[sp - 1]
+		sp = sp - 2
+		local ax, ay, bx, by = xs[i], ys[i], xs[j], ys[j]
+		local dx, dy = bx - ax, by - ay
+		local len2 = dx * dx + dy * dy
+		local bestD, bestK = 0, nil
+		for k = i + 1, j - 1 do
+			local d, f
+			if len2 < 1e-9 then
+				f = 0
+				d = ns.dist(xs[k], ys[k], ax, ay)
+			else
+				f = max(0, min(1, ((xs[k] - ax) * dx + (ys[k] - ay) * dy) / len2))
+				d = ns.dist(xs[k], ys[k], ax + dx * f, ay + dy * f)
+			end
+			if zs then d = max(d, abs(zs[k] - (zs[i] + (zs[j] - zs[i]) * f)) * 0.5) end
+			if d > bestD then bestD, bestK = d, k end
+		end
+		if bestK and bestD > tol then
+			keep[bestK] = true
+			stack[sp + 1], stack[sp + 2], stack[sp + 3], stack[sp + 4] = i, bestK, bestK, j
+			sp = sp + 4
+		end
+	end
+	local ox, oy, oz = {}, {}, zs and {} or nil
+	for i = 1, n do
+		if keep[i] then
+			ox[#ox + 1], oy[#oy + 1] = xs[i], ys[i]
+			if zs then oz[#oz + 1] = zs[i] end
+		end
+	end
+	return ox, oy, oz
+end
+
+-- the walking leg you are on, from the point BV says you are up to, as a Pathy route (world coordinates, heights),
+-- reduced to its real bends. Built once per leg: Pathfinder follows it from there (where you are on it, how far
+-- is left) and BV replaces the leg when it plans again.
 local function applyWalk(N, step, px, py)
 	local H = ns.HBD()
 	local cont, pts = step.from.cont, step.path
@@ -143,7 +200,9 @@ local function applyWalk(N, step, px, py)
 	local ex, ey = H:GetWorldCoordinatesFromZone(step.to.x, step.to.y, step.to.cont)
 	if ex and ns.dist(xs[#xs], ys[#ys], ex, ey) > 1 then xs[#xs + 1], ys[#ys + 1], zs[#zs + 1] = ex, ey, step.to.z or false end
 	if #xs < 2 then return false end
-	PF.SetPath({ x = xs, y = ys, z = fillZ(zs, #xs), n = #xs, walked = true, bv = true }, false)
+	local fz = fillZ(zs, #xs)
+	xs, ys, fz = simplify(xs, ys, fz, 1)
+	PF.SetPath({ x = xs, y = ys, z = fz, n = #xs, walked = true, bv = true }, false)
 	st.path = PF.path
 	return true
 end
@@ -359,11 +418,12 @@ local function route(now)
 	ns.bvText = describe(R, N, t)
 	local step = N.steps and N.goal == st.goal and N.steps[N.current]
 	if step and step.kind == "walk" and type(step.path) == "table" and #step.path >= 2 then
-		-- the leg you walk: what changed since the route was drawn (another step, further along it, or another
-		-- route put there)
-		if st.sigSteps ~= N.steps or st.sigCurrent ~= N.current or st.sigAhead ~= N.ahead or PF.path ~= st.path then
+		-- the leg you walk: only when it is another leg or BV planned it again (its path is a new table), or something
+		-- else put a route there. Not as you walk along it: replacing the route re-places Pathfinder's marker, and the
+		-- dots and the arrow, which line up to it, flash
+		if st.sigSteps ~= N.steps or st.sigCurrent ~= N.current or st.sigPath ~= step.path or PF.path ~= st.path then
 			if applyWalk(N, step, px, py) then
-				st.sigSteps, st.sigCurrent, st.sigAhead = N.steps, N.current, N.ahead
+				st.sigSteps, st.sigCurrent, st.sigPath = N.steps, N.current, step.path
 			end
 		end
 	elseif step then

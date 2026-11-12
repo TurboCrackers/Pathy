@@ -78,7 +78,10 @@ local function build(R)
 	end
 	if not f then return end
 	obj = o
-	f:SetFrameStrata("MEDIUM") -- BV's is DIALOG, over everything; this stays under the game's windows
+	-- BV's is DIALOG, over everything; this stays under the game's windows, and under Pathy's arrow, which is drawn
+	-- in its medallion (the arrow's frame is at level 60)
+	f:SetFrameStrata("LOW")
+	f:SetFrameLevel(10)
 	f:SetToplevel(false)
 	-- not BV's window: its own placement, ticker and menu are not wanted
 	f:SetScript("OnShow", nil)
@@ -115,6 +118,9 @@ local function build(R)
 		if N and (N.steps or N.busy) and ns.getTarget() then
 			local good, err = pcall(o.Paint, o)
 			if not good then reportOnce(err) end
+			-- BV's flat arrow (the filled "course") gives way to Pathy's 3D arrow in the same place; the hollow
+			-- target point on the ring, the forward tick and the symbols (a lift, a flight) stay as BV draws them
+			f.course:Hide()
 		end
 	end)
 	place(f)
@@ -123,6 +129,31 @@ end
 
 function HUD.hide()
 	if obj and obj.frame then obj.frame:Hide() end
+end
+
+-- For Pathy's 3D arrow: where the medallion is (screen units from the bottom left), the arrow's length there, and
+-- the HUD's accent colour, so the arrow takes the flat arrow's place and looks like the rest of the window. false
+-- while the medallion shows a symbol instead (a lift, a flight, a ride, "?"); nothing when the HUD is not shown.
+function HUD.arrowSpot()
+	local f = obj and obj.frame
+	if not (f and f:IsShown() and f.medal and f.arrow and ns.getTarget()) then return end
+	if f.arrow:IsShown() then
+		-- a symbol for a lift, flight or ride stays; BV's "?" (it has no direction to give) does not: Pathy's own
+		-- arrow has one
+		if f.arrowSymbol ~= "circle-help" then return false end
+		f.arrow:Hide()
+	end
+	local x, y = f.medal:GetCenter()
+	if not x then return end
+	local s = f.medal:GetEffectiveScale() / UIParent:GetEffectiveScale()
+	local r, g, b = 1, 0.82, 0
+	local style = obj.style
+	if style and style.Color then
+		local key = style.materialProfile == "interface" and "accentText" or "accent" -- as BV's own course arrow
+		local ok, cr, cg, cb = pcall(style.Color, style, key)
+		if ok and cr then r, g, b = cr, cg, cb end
+	end
+	return x * s, y * s, f.medal:GetWidth() * s * 0.68, r, g, b
 end
 
 -- Called ten times a second by BV.lua while Pathy guides. True when this HUD is what is shown (else BV.lua shows

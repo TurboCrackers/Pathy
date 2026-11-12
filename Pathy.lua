@@ -503,6 +503,15 @@ local function unitWorldPos(u)
 	if x and (x ~= 0 or y ~= 0) then return x, y, inst end
 end
 
+-- A player's whole name as the game writes it in chat: the character's name and its realm ("Name-Realm"), the
+-- realm being the player's own when the game leaves it out
+local function fullName(u)
+	local name, realm = UnitFullName(u)
+	if not name then return end
+	if not realm or realm == "" then realm = GetRealmName() end
+	return (realm and realm ~= "") and (name .. "-" .. realm) or name
+end
+
 local function goUnit(guid, name)
 	local u = unitByGuid(guid)
 	if not u then return Print((name or "they") .. " isn't in your group: invite them to be guided to them") end
@@ -1069,14 +1078,15 @@ local function buildLists()
 		local u = IsInRaid() and ("raid" .. i) or ("party" .. i)
 		local guid, name = UnitGUID(u), UnitName(u)
 		if guid and name and not UnitIsUnit(u, "player") then
-			inGroup[name] = true
+			local full = fullName(u) or name
+			inGroup[name], inGroup[full] = true, true
 			local x, y, inst = unitWorldPos(u)
 			local d = x and px and inst == instance and dist(px, py, x, y)
 			local _, class = UnitClass(u)
 			local cname = CLASS_NAMES[class or ""]
-			group[#group + 1] = { top = name, icon = cname and ("Interface\\Icons\\ClassIcon_" .. cname:gsub(" ", "")) or ICONS.group,
+			group[#group + 1] = { top = full, icon = cname and ("Interface\\Icons\\ClassIcon_" .. cname:gsub(" ", "")) or ICONS.group,
 				sub = (not UnitIsConnected(u) and "offline") or (d and yards(d)) or (x and "other continent") or "no position (in a dungeon?)",
-				action = function() goUnit(guid, name) end, key = "unit:" .. guid, d = d or 1e9 }
+				action = function() goUnit(guid, full) end, key = "unit:" .. guid, d = d or 1e9 }
 		end
 	end
 	table.sort(group, function(a, b) return a.d < b.d end)
@@ -1603,6 +1613,7 @@ local LIGHT = { -0.35, 0.75, -0.56 } -- towards the light, in the camera's axes 
 local arrow = CreateFrame("Frame", "PathyArrow", UIParent)
 arrow:SetAllPoints()
 arrow:SetFrameStrata("LOW")
+arrow:SetFrameLevel(60) -- above the HUD (HUD.lua), in whose medallion it is drawn
 arrow:Hide()
 arrow.climb = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 arrow.climb:SetPoint("CENTER")
@@ -1660,9 +1671,22 @@ end
 ns.arrowAnchor = arrowAnchor
 ns.arrowRadius = function() return ARROW_PX * cfg("arrowSize") / 2 end
 
+-- Where the arrow is drawn, how big (nose to tail, in pixels) and in what colour: in the medallion of the HUD
+-- (HUD.lua), at its size and in its accent colour, while that is shown; else where the player put it. false: the
+-- HUD is showing a symbol there (a flight, a lift) and the arrow stays away.
+local function arrowSpot()
+	local hud = ns.HUD
+	if hud and hud.arrowSpot then
+		local x, y, size, r, g, b = hud.arrowSpot()
+		if x == false then return false end
+		if x then return x, y, size, { r, g, b } end
+	end
+	return cfg("arrowX") * UIParent:GetWidth(), cfg("arrowY") * UIParent:GetHeight()
+end
+
 -- Draws the arrow at screen spot (ax, ay), pointing along world direction (dE, dN, dU) as the current camera
--- sees it.
-local function renderArrow(ax, ay, dE, dN, dU)
+-- sees it. sizePx and colour override the settings (the HUD's).
+local function renderArrow(ax, ay, dE, dN, dU, sizePx, colour)
 	local l = sqrt(dE * dE + dN * dN + dU * dU)
 	if l < 1e-6 then return hideArrowShape() end
 	local aF1, aF2, aF3 = dE / l, dN / l, dU / l
@@ -1671,7 +1695,7 @@ local function renderArrow(ax, ay, dE, dN, dU)
 	local aR1, aR2, aR3 = rx, ry, 0
 	if hl > 1e-3 then aR1, aR2 = aF2 / hl, -aF1 / hl end
 	local aU1, aU2, aU3 = aR2 * aF3 - aR3 * aF2, aR3 * aF1 - aR1 * aF3, aR1 * aF2 - aR2 * aF1
-	local size = ARROW_PX * cfg("arrowSize")
+	local size = sizePx or ARROW_PX * cfg("arrowSize")
 	local Fpx = size * ARROW_DIST / 2
 
 	local function camDir(x, y, z) -- a direction of the arrow in the camera's axes (right, up, into the screen)
@@ -1723,7 +1747,9 @@ local function renderArrow(ax, ay, dE, dN, dU)
 	table.sort(faces, function(a, c) return a.depth > c.depth end) -- far first
 
 	local r, g, b
-	if cfg("arrowDirColour") then
+	if colour then
+		r, g, b = colour[1], colour[2], colour[3]
+	elseif cfg("arrowDirColour") then
 		local fl = sqrt(fx * fx + fy * fy)
 		local off = (hl > 1e-3 and fl > 1e-3) and math.acos(max(-1, min(1, (aF1 * fx + aF2 * fy) / (hl * fl)))) or 0
 		r, g, b = directionColour(off)
@@ -1731,7 +1757,7 @@ local function renderArrow(ax, ay, dE, dN, dU)
 		local c = cfg("arrowColour")
 		r, g, b = c[1], c[2], c[3]
 	end
-	local alpha = cfg("arrowAlpha")
+	local alpha = colour and 1 or cfg("arrowAlpha")
 	for i, f in ipairs(faces) do
 		local t = quad(i)
 		t:SetDrawLayer("ARTWORK", min(7, -8 + i))
@@ -2079,15 +2105,24 @@ driver:SetScript("OnUpdate", function(_, dt)
 	if not ok then report(n); n, guiding = 0, false end
 	for i = n + 1, #pool do pool[i]:Hide() end
 
+	local ax, ay, hudSize, hudColour = arrowSpot()
+	if ax == false then return hideArrowShape() end -- the HUD shows a symbol in the medallion
+	if hudSize and not arrow:IsShown() then arrow:Show() end -- the HUD's arrow does not depend on the arrow setting
+	if not hudSize and not cfg("arrow") then
+		if arrow:IsShown() then arrow:Hide(); hideArrowShape() end
+		return
+	end
 	if not arrow:IsShown() then return end
-	local ax, ay = arrowAnchor()
 	if guiding and smooth.E then
 		-- The arrow ignores the camera's pitch: it is always drawn as seen from the default tilt, turned only by
 		-- which way the camera faces. (The dots were drawn with the real camera just before.)
 		setCamera(cam.yaw or GetPlayerFacing() or 0, rad(ARROW_TILT), 0, 0, 0, 1)
-		local okA, err = pcall(renderArrow, ax, ay, smooth.E, smooth.N, smooth.U)
+		local okA, err = pcall(renderArrow, ax, ay, smooth.E, smooth.N, smooth.U, hudSize, hudColour)
 		if not okA then report(err); return hideArrowShape() end
-		if cfg("arrowText") then
+		if hudSize then
+			-- in the HUD's medallion: the HUD says the yards and what to do, the arrow's own tilt shows up and down
+			arrow.climb:SetText("")
+			arrow.dist:SetText("")
 		elseif cfg("arrowText") then
 			if climb and climb > CLIMB then
 				arrow.climb:SetText("^ up")
@@ -2106,7 +2141,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 	elseif target and not handle:IsShown() then
 		hideArrowShape()
 		local why = noRouteText() or dbg.reason
-		if why then
+		if why and not hudSize then
 			arrow.climb:ClearAllPoints()
 			arrow.climb:SetPoint("TOP", UIParent, "BOTTOMLEFT", ax, ay)
 			arrow.climb:SetText("|cffff9933Pathy: " .. why .. "|r")
