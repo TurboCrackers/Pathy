@@ -349,7 +349,7 @@ end
 -- the settings changed (the panel's, BV's window's)
 function BV.refresh()
 	silenceBV()
-	manageBVGuide(routing(), ns.getTarget() ~= nil and ns.cfg("hideBVGuide"))
+	manageBVGuide(routing(), ns.getTarget() ~= nil)
 	if panel and not ns.cfg("guidePanel") then panel:Hide() end
 	if not ns.cfg("guidePanel") and ns.HUD then ns.HUD.hide() end
 	if ns.HUD and ns.HUD.refresh then ns.HUD.refresh() end
@@ -397,7 +397,7 @@ local function route(now)
 	local R = routing()
 	local N = R and R.Navigate
 	silenceBV()
-	manageBVGuide(R, t ~= nil and ns.cfg("hideBVGuide"))
+	manageBVGuide(R, t ~= nil)
 	-- the way ended by hand (the HUD's button, /bv route stop) stays ended: not planned again behind your back
 	if N and not st.stopWrapped then
 		st.stopWrapped = true

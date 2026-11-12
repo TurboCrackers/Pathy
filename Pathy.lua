@@ -20,7 +20,7 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
 	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
-	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false, simpleUI = false,
+	guidePanel = true, silenceBV = true, showLogButton = false, simpleUI = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
 	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, hudLocked = false, uiScale = 1, minimapButton = true, followTracked = true,
 }
@@ -1824,7 +1824,7 @@ function applied(key)
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" or key == "windowColour" or key == "windowBorder" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
-	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI" or key == "hudScale" or key == "hudAlpha" or key == "hudLocked" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
+	if (key == "guidePanel" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI" or key == "hudScale" or key == "hudAlpha" or key == "hudLocked" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
 end
@@ -2045,7 +2045,6 @@ local function buildSettings(content)
 	h.slider("hudAlpha", "HUD opacity", 0.2, 1, 0.05, "%d%%", 100)
 	h.check("hudColourOn", "Use my own color for the HUD's arrow instead of the theme's")
 	h.swatch("hudColour", "HUD arrow color")
-	h.check("hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)")
 	h.check("silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)")
 	h.check("showLogButton", "Show the log button on the HUD (what the route planner did for this way)")
 	h.buttons({ "Reset HUD position", 140, function()
@@ -2283,7 +2282,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 	if event == "ADDON_LOADED" and arg1 == ADDON then
 		PathyDB = PathyDB or {}
 		-- what earlier versions kept for routes of their own (walked spots, flight paths, NPC heights, their switches): gone
-		for _, k in ipairs({ "walk", "walk2", "walk3", "walkCell", "npcZ", "taxi", "mountSpeed", "recordWalk", "useWalked", "recordOthers", "useGrid", "gridOnly", "useGolden", "refine", "bvOnly", "restore", "savedPin" }) do PathyDB[k] = nil end
+		for _, k in ipairs({ "walk", "walk2", "walk3", "walkCell", "npcZ", "taxi", "mountSpeed", "recordWalk", "useWalked", "recordOthers", "useGrid", "gridOnly", "useGolden", "refine", "bvOnly", "restore", "savedPin", "hideBVGuide" }) do PathyDB[k] = nil end
 		PathyDB.arrowPos, PathyDB.fixedDots, PathyDB.arrowScale, PathyDB.tilt = nil, nil, nil, nil -- from older versions
 		if type(PathyDB.textX) == "number" and (PathyDB.textX < 0 or PathyDB.textX > 1) then PathyDB.textX = nil end
 		if type(PathyDB.textY) == "number" and (PathyDB.textY < 0 or PathyDB.textY > 1) then PathyDB.textY = nil end
