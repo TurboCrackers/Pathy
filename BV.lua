@@ -224,8 +224,7 @@ local function describe(R, N, t)
 	local left
 	if step.kind == "walk" and type(step.path) == "table" then left = step.yards end
 	local say = safe(N.Say, N, step, left) or step.kind
-	local total = N.seconds and safe(N.Clock, N.seconds)
-	return string.format("Route: step %d of %d - %s%s", N.current or 0, #N.steps, say, total and (" (about " .. total .. " in all)") or "")
+	return string.format("Route: step %d of %d - %s", N.current or 0, #N.steps, say)
 end
 
 -- The guide panel ---------------------------------------------------------------------------------------------
