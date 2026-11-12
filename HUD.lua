@@ -25,16 +25,23 @@ local function reportOnce(err)
 	end
 end
 
+-- Anchored only when the spot has changed: anchoring the frame again (even to the same place) makes the game think
+-- the mouse has left whatever it was over, and a tooltip on one of the HUD's buttons vanishes at once
 local function place(f)
 	local at = PathyDB.hudAt
-	f:ClearAllPoints()
+	local point, x, y
 	if type(at) == "table" and type(at.x) == "number" and type(at.y) == "number" then
-		f:SetPoint("CENTER", UIParent, "BOTTOMLEFT", at.x, at.y)
+		point, x, y = "CENTER", at.x, at.y
 	else
 		-- not moved yet: under the arrow's own text, wherever that stands
-		local tx, ty = ns.cfg("textX") * UIParent:GetWidth(), ns.cfg("textY") * UIParent:GetHeight()
-		f:SetPoint("TOP", UIParent, "BOTTOMLEFT", tx, ty - 40)
+		point = "TOP"
+		x, y = ns.cfg("textX") * UIParent:GetWidth(), ns.cfg("textY") * UIParent:GetHeight() - 40
 	end
+	local was = f.pathyAt
+	if was and was[1] == point and math.abs(was[2] - x) < 0.5 and math.abs(was[3] - y) < 0.5 then return end
+	f.pathyAt = { point, x, y }
+	f:ClearAllPoints()
+	f:SetPoint(point, UIParent, "BOTTOMLEFT", x, y)
 end
 
 function HUD.menu(owner)
@@ -94,6 +101,7 @@ local function build(R)
 	end
 	if not f then return end
 	obj = o
+	f.forward:Hide()
 	-- BV's is DIALOG, over everything; this stays under the game's windows, and under Pathy's arrow, which is drawn
 	-- in its medallion (the arrow's frame is at level 60)
 	f:SetFrameStrata("LOW")
@@ -139,6 +147,7 @@ local function build(R)
 			-- forward tick and the symbols (a lift, a flight) stay as BV draws them
 			f.course:Hide()
 			f.point:Hide()
+			f.forward:Hide() -- the short white line at the top of the circle
 			tidy(f, N)
 		end
 	end)
@@ -172,7 +181,7 @@ function HUD.arrowSpot()
 		local ok, cr, cg, cb = pcall(style.Color, style, key)
 		if ok and cr then r, g, b = cr, cg, cb end
 	end
-	return x * s, y * s, f.medal:GetWidth() * s * 0.68, r, g, b
+	return x * s, y * s, f.medal:GetWidth() * s * 0.9, r, g, b
 end
 
 -- Called ten times a second by BV.lua while Pathy guides. True when this HUD is what is shown (else BV.lua shows
