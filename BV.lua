@@ -282,8 +282,12 @@ local function content(R, N, t)
 	elseif step.kind == "flight" then
 		now, target = "Fly " .. (parts.target or ""), "Talk to the flight master. Wait here until you land."
 	elseif step.kind == "transport" then
-		now = (parts.verb or "Ride") .. " " .. (parts.target or "")
-		target = (R.Timetable and safe(R.Timetable.GuideText, R.Timetable, step)) or "Wait for it here and ride along until you are there."
+		if st.riding then
+			now, target = "Riding " .. (parts.target or ""), "You are on it: stay on until you arrive."
+		else
+			now = (parts.verb or "Ride") .. " " .. (parts.target or "")
+			target = (R.Timetable and safe(R.Timetable.GuideText, R.Timetable, step)) or "Wait for it here and ride along until you are there."
+		end
 	else
 		now = parts.verb or "Go"
 		target = parts.name and (parts.name .. "  -  " .. (parts.target or "")) or (parts.target or "")
@@ -350,6 +354,42 @@ function BV.refresh()
 	if not ns.cfg("guidePanel") and ns.HUD then ns.HUD.hide() end
 end
 
+-- Riding something that carries you (a tram, a boat, a zeppelin): your position changes fast while your own speed
+-- does not. BV watches ships and zeppelins this way but not the tram, and tells you to "wait here, departure time not
+-- known yet" while you are already sitting in it; this notices it instead. Inside the tram's own map (which has no
+-- place on a continent) a tram step also means you are aboard.
+local function watchRide(R, N, step, now)
+	local mapID, mx, my = R:Position()
+	local cont, cx, cy
+	if mapID then cont, cx, cy = R:OnContinent(mapID, mx, my) end
+	if mapID and not cont and step and step.kind == "transport" and type(step.by) == "table" and step.by.kind == "tram" then
+		st.riding, st.rideSample = true, nil
+		return
+	end
+	if not cont then
+		st.rideSample = nil
+		return
+	end
+	local s = st.rideSample
+	if s and s.cont == cont then
+		local dt = now - s.t
+		if dt < 0.25 then return end
+		local yards = N.Yards(cont, cx, cy, s.x, s.y)
+		local speed = yards / dt
+		local own = GetUnitSpeed("player") or 0
+		if yards > 60 then
+			st.rideSince, st.riding = nil, false -- a jump (a teleport, a loading screen), not a ride
+		elseif speed > 3 and own < speed * 0.5 and not UnitOnTaxi("player") and not (IsFalling and IsFalling()) then
+			st.rideSince = st.rideSince or now
+			if now - st.rideSince > 1 then st.riding = true end
+		elseif speed < 1.5 or own >= speed * 0.8 then
+			st.rideSince, st.riding = nil, false
+		end
+	end
+	st.rideSample = { cont = cont, x = cx, y = cy, t = now }
+end
+ns.riding = function() return st.riding == true end -- (for HUD.lua)
+
 local function route(now)
 	local t = ns.getTarget()
 	local R = routing()
@@ -409,6 +449,7 @@ local function route(now)
 		return
 	end
 	if N.steps and N.goal == st.goal then st.sawSteps = true end
+	watchRide(R, N, N.steps and N.goal == st.goal and N.steps[N.current] or nil, now)
 	ns.bvText = describe(R, N, t)
 	local step = N.steps and N.goal == st.goal and N.steps[N.current]
 	if step and step.kind == "walk" and type(step.path) == "table" and #step.path >= 2 then

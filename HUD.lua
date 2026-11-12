@@ -148,6 +148,13 @@ local function build(R)
 			f.course:Hide()
 			f.point:Hide()
 			f.forward:Hide() -- the short white line at the top of the circle
+			-- already aboard a tram (BV does not notice that one and says "departure time not known yet")
+			local step = N.steps and N.steps[N.current or 1]
+			if step and step.kind == "transport" and ns.riding and ns.riding() then
+				local parts = ns.safe(N.Parts, N, step) or {}
+				o:SetNow("Riding " .. (parts.target or ""))
+				f.target:SetText("You are on it: stay on until you arrive.")
+			end
 			tidy(f, N)
 		end
 	end)
