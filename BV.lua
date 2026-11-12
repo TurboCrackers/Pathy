@@ -390,6 +390,9 @@ end
 ns.riding = function() return st.riding == true end -- (for HUD.lua)
 ns.ended = function() return st.ended == true end -- the route has ended (for the arrow)
 
+-- the spots tried (yards from the place) when there is no way to the place itself
+local ALTS = { { 5, 0 }, { -5, 0 }, { 0, 5 }, { 0, -5 }, { 10, 0 }, { -10, 0 }, { 0, 10 }, { 0, -10 } }
+
 -- no known route: the arrow points straight at the destination (when it is on the same map as you)
 local function direct(t, px, py)
 	local _, _, inst = ns.HBD():GetPlayerWorldPosition()
@@ -443,11 +446,35 @@ local function route(now)
 			direct(t, px, py)
 			return
 		end
-		st.key, st.goal, st.startAt, st.sawSteps, st.stoppedByUser = key, goal, now, nil, nil
+		st.key, st.goal, st.startAt, st.sawSteps, st.stoppedByUser, st.alt = key, goal, now, nil, nil, 0
 		local ok, err = pcall(N.Start, N, goal)
 		if not ok then
 			st.goal = nil
 			ns.bvText = "Route error: " .. tostring(err)
+		end
+		return
+	end
+	-- No way to the place itself (a banker behind bars): try spots close by, 5 and then 10 yards north, south, east and
+	-- west of it, one after the other, until one can be reached
+	if st.goal and not N.steps and not N.busy and not st.sawSteps and not st.stoppedByUser and now - st.startAt > 1 and (st.alt or 0) < #ALTS then
+		st.alt = (st.alt or 0) + 1
+		if st.alt == 1 then
+			-- the game does not say which way an NPC faces, so the side nearest you goes first (the side you can
+			-- reach is mostly the side you stand on), the 5 yard ring before the 10 yard one
+			st.altList = {}
+			for i, o in ipairs(ALTS) do st.altList[i] = o end
+			table.sort(st.altList, function(a, b)
+				local ra, rb = math.abs(a[1] + a[2]), math.abs(b[1] + b[2])
+				if ra ~= rb then return ra < rb end
+				return ns.dist(px, py, t.x + a[1], t.y + a[2]) < ns.dist(px, py, t.x + b[1], t.y + b[2])
+			end)
+		end
+		local o = st.altList[st.alt]
+		local g = makeGoal(R, { x = t.x + o[1], y = t.y + o[2], uiMap = t.uiMap, instance = t.instance, name = t.name })
+		if g then
+			st.goal, st.startAt = g, now
+			ns.bvText = "Calculating the way..."
+			pcall(N.Start, N, g)
 		end
 		return
 	end
