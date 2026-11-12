@@ -195,30 +195,6 @@ end
 -- Guiding
 ------------------------------------------------------------------------------------------------------------
 
--- Earlier versions of Pathy ran on Guidelime Pathfinder and changed some of its settings (the minimap trail, the
--- marker, the dots) and WaypointTracker's "follow map pins" while guiding, keeping the originals in PathyDB.restore;
--- and kept your own map pin aside while Pathfinder steered the game's pin. Pathy no longer touches any of that;
--- what an earlier version left changed is put back once.
-local function restoreOldSettings()
-	local restore = PathyDB.restore
-	if type(restore) == "table" then
-		local owners = { minimap = GuidelimePathfinderDB, marker = GuidelimePathfinderDB, dots = GuidelimePathfinderDB,
-			followMapPins = WaypointTrackerDB and WaypointTrackerDB.settings }
-		for key, value in pairs(restore) do
-			local db = owners[key]
-			if db then
-				if value == "default" then db[key] = nil else db[key] = value end
-			end
-		end
-	end
-	local pin = PathyDB.savedPin
-	if pin and not (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then
-		pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(pin[1], pin[2], pin[3]))
-		if pin[4] and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then C_SuperTrack.SetSuperTrackedUserWaypoint(true) end
-	end
-	PathyDB.restore, PathyDB.savedPin = nil, nil
-end
-
 -- The map pin you have, if any ( { map, x, y, tracked } )
 local function currentPin()
 	if not (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then return end
@@ -2204,7 +2180,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 	if event == "ADDON_LOADED" and arg1 == ADDON then
 		PathyDB = PathyDB or {}
 		-- what earlier versions kept for routes of their own (walked spots, flight paths, NPC heights, their switches): gone
-		for _, k in ipairs({ "walk", "walk2", "walk3", "walkCell", "npcZ", "taxi", "mountSpeed", "recordWalk", "useWalked", "recordOthers", "useGrid", "gridOnly", "useGolden", "refine", "bvOnly" }) do PathyDB[k] = nil end
+		for _, k in ipairs({ "walk", "walk2", "walk3", "walkCell", "npcZ", "taxi", "mountSpeed", "recordWalk", "useWalked", "recordOthers", "useGrid", "gridOnly", "useGolden", "refine", "bvOnly", "restore", "savedPin" }) do PathyDB[k] = nil end
 		PathyDB.arrowPos, PathyDB.fixedDots, PathyDB.arrowScale, PathyDB.tilt = nil, nil, nil, nil -- from older versions
 		if type(PathyDB.textX) == "number" and (PathyDB.textX < 0 or PathyDB.textX > 1) then PathyDB.textX = nil end
 		if type(PathyDB.textY) == "number" and (PathyDB.textY < 0 or PathyDB.textY > 1) then PathyDB.textY = nil end
@@ -2219,7 +2195,6 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 		updateMinimapButton()
 		pcall(registerOptionsEntry)
 	elseif event == "PLAYER_LOGIN" then
-		pcall(restoreOldSettings)
 		pcall(ctx.install)
 		-- the window was open when you left: open it again (after Questie has had a moment to load)
 		if PathyDB.shown then C_Timer.After(2, function() if not f:IsShown() then f:Show() end end) end

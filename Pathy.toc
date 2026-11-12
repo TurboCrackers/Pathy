@@ -4,7 +4,6 @@
 ## Author: lil bub
 ## Version: 2.0.0
 ## Dependencies: Questie, BVAddonSuite_Routing
-## OptionalDeps: WaypointTracker
 ## SavedVariables: PathyDB
 
 Pathy.lua
