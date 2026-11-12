@@ -215,9 +215,8 @@ end
 local function describe(R, N, t)
 	if not N.steps then
 		if N.busy then return "Calculating the way..." end
-		local last = R.log and R.log[#R.log]
 		if st.sawSteps then return "The route has ended" end
-		return "No route to " .. (t.name or "here") .. (last and (" - " .. last:gsub("^%d+:%d+:%d+%s+", "")) or "")
+		return "No known route"
 	end
 	local step = N.steps[N.current]
 	if not step then return "No current step" end
@@ -391,6 +390,16 @@ end
 ns.riding = function() return st.riding == true end -- (for HUD.lua)
 ns.ended = function() return st.ended == true end -- the route has ended (for the arrow)
 
+-- no known route: the arrow points straight at the destination (when it is on the same map as you)
+local function direct(t, px, py)
+	local _, _, inst = ns.HBD():GetPlayerWorldPosition()
+	if inst and inst == t.instance and ns.dist(px, py, t.x, t.y) > 1 then
+		ns.setRoute({ px, t.x }, { py, t.y }, nil)
+	else
+		ns.clearRoute()
+	end
+end
+
 local function route(now)
 	local t = ns.getTarget()
 	local R = routing()
@@ -430,7 +439,8 @@ local function route(now)
 		end
 		local goal = makeGoal(R, t)
 		if not goal then
-			ns.bvText = "This destination cannot be placed on a continent map"
+			ns.bvText = "No known route"
+			direct(t, px, py)
 			return
 		end
 		st.key, st.goal, st.startAt, st.sawSteps, st.stoppedByUser = key, goal, now, nil, nil
@@ -469,9 +479,9 @@ local function route(now)
 		st.sigSteps, st.path = nil, nil
 		ns.clearRoute()
 	elseif not N.busy then
-		-- no route (none found, or it has ended): nothing for the arrow to follow
+		-- no route: none found (the arrow points straight at it) or it has ended (nothing to follow)
 		st.sigSteps, st.path = nil, nil
-		ns.clearRoute()
+		if st.sawSteps then ns.clearRoute() else direct(t, px, py) end
 	end
 end
 
