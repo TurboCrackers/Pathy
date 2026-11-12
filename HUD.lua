@@ -28,6 +28,7 @@ end
 -- Anchored only when the spot has changed: anchoring the frame again (even to the same place) makes the game think
 -- the mouse has left whatever it was over, and a tooltip on one of the HUD's buttons vanishes at once
 local function place(f)
+	local sc = ns.cfg("hudScale") or 1
 	local at = PathyDB.hudAt
 	local point, x, y
 	if type(at) == "table" and type(at.x) == "number" and type(at.y) == "number" then
@@ -38,10 +39,12 @@ local function place(f)
 		x, y = ns.cfg("textX") * UIParent:GetWidth(), ns.cfg("textY") * UIParent:GetHeight() - 40
 	end
 	local was = f.pathyAt
-	if was and was[1] == point and math.abs(was[2] - x) < 0.5 and math.abs(was[3] - y) < 0.5 then return end
-	f.pathyAt = { point, x, y }
+	if was and was[1] == point and was[4] == sc and math.abs(was[2] - x) < 0.5 and math.abs(was[3] - y) < 0.5 then return end
+	f.pathyAt = { point, x, y, sc }
+	if f:GetScale() ~= sc then f:SetScale(sc) end
+	f:SetAlpha(ns.cfg("hudAlpha") or 1)
 	f:ClearAllPoints()
-	f:SetPoint(point, UIParent, "BOTTOMLEFT", x, y)
+	f:SetPoint(point, UIParent, "BOTTOMLEFT", x / sc, y / sc)
 end
 
 function HUD.menu(owner)
@@ -102,7 +105,11 @@ end
 
 function HUD.refresh()
 	local f = obj and obj.frame
-	if f then layout(f) end
+	if f then
+		layout(f)
+		f:SetAlpha(ns.cfg("hudAlpha") or 1)
+		place(f)
+	end
 end
 
 -- BV's constructor on Pathy's own object: the frame it makes is ours
@@ -157,7 +164,10 @@ local function build(R)
 		self:StopMovingOrSizing()
 		self.pathyMoving = nil
 		local x, y = self:GetCenter()
-		if x and y then PathyDB.hudAt = { x = x, y = y } end
+		if x and y then
+				local sc = self:GetScale()
+				PathyDB.hudAt = { x = x * sc, y = y * sc }
+			end
 	end)
 	f:SetScript("OnMouseUp", function(self, button)
 		if button == "RightButton" then HUD.menu(self) end

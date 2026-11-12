@@ -22,7 +22,7 @@ local DEFAULTS = {
 	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
 	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false, simpleUI = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
-	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, uiScale = 1, minimapButton = true, followTracked = true,
+	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, uiScale = 1, minimapButton = true, followTracked = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
@@ -1823,7 +1823,7 @@ function applied(key)
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" or key == "windowColour" or key == "windowBorder" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
-	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI") and ns.BV then ns.BV.refresh() end
+	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI" or key == "hudScale" or key == "hudAlpha" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
 end
@@ -2015,34 +2015,45 @@ local function buildSettings(content)
 	end
 
 	local g = section("General")
+	g.check("simpleUI", "Simple path UI: only the arrow, with the instructions under it (no HUD)")
 	g.check("minimapButton", "Pathy button on the minimap")
 	g.check("followTracked", "Guide to the quest I focus in Questie's tracker")
 	g.slider("arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", 1, 120, 1, "%d yd")
-	g.slider("windowAlpha", "Pathy window background opacity", 0, 1, 0.05, "%d%%", 100)
-	g.slider("uiScale", "Pathy window size (UI scale)", 0.5, 1.5, 0.05, "%d%%", 100)
 	g.buttons({ "Reset everything to defaults", 220, function()
 		for k in pairs(DEFAULTS) do PathyDB[k] = nil end
+		PathyDB.hudAt = nil
 		for k in pairs(DEFAULTS) do applied(k) end
 		refreshSettings()
 	end })
 
-	local c = section("Colour scheme")
-	c.swatch("windowColour", "Pathy window background")
-	c.swatch("windowBorder", "Pathy window border")
-	c.check("hudColourOn", "Use my own colour for the HUD's arrow instead of the theme's")
-	c.swatch("hudColour", "HUD arrow colour")
-	c.buttons({ "Reset colours", 120, function()
-		PathyDB.windowColour, PathyDB.windowBorder, PathyDB.hudColourOn, PathyDB.hudColour = nil, nil, nil, nil
+	local p = section("Pathy Window Settings")
+	p.slider("windowAlpha", "Window background opacity", 0, 1, 0.05, "%d%%", 100)
+	p.slider("uiScale", "Window size (UI scale)", 0.5, 1.5, 0.05, "%d%%", 100)
+	p.swatch("windowColour", "Window background colour")
+	p.swatch("windowBorder", "Window border colour")
+	p.buttons({ "Reset colours", 120, function()
+		PathyDB.windowColour, PathyDB.windowBorder = nil, nil
 		applied("windowColour")
 		refreshSettings()
 	end })
 
-	local h = section("HUD")
-	h.check("simpleUI", "Simple path UI: only the arrow, with the instructions under it (no HUD)")
+	local h = section("Detailed Widget Settings")
 	h.check("guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)")
+	h.slider("hudScale", "HUD size", 0.5, 2, 0.05, "%d%%", 100)
+	h.slider("hudAlpha", "HUD opacity", 0.2, 1, 0.05, "%d%%", 100)
+	h.check("hudColourOn", "Use my own colour for the HUD's arrow instead of the theme's")
+	h.swatch("hudColour", "HUD arrow colour")
 	h.check("hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)")
 	h.check("silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)")
 	h.check("showLogButton", "Show the log button on the HUD (what the route planner did for this way)")
+	h.buttons({ "Reset HUD position", 140, function()
+		PathyDB.hudAt = nil
+		applied("hudScale")
+	end }, { "Reset HUD look", 120, function()
+		PathyDB.hudScale, PathyDB.hudAlpha, PathyDB.hudColourOn, PathyDB.hudColour = nil, nil, nil, nil
+		applied("hudScale")
+		refreshSettings()
+	end })
 
 	local w = section("Simple Widget Settings", true)
 	w.check("arrow", "Show the arrow")
