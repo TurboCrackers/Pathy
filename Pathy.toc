@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: Pathy
-## Notes: Pick a quest giver or turn-in and be led there by a 3D arrow, with a copy of BV Addon Suite's guide window, along the route BV Addon Suite - Routing plans (walls, stairs, lifts, boats and zeppelins included). Uses Questie's WoW: Forever database for the places.
+## Notes: Pick a quest giver or turn-in and be led there by a 3D arrow, with a guide window, along a planned route (walls, stairs, lifts, boats and zeppelins included). Uses Questie's WoW: Forever database for the places.
 ## Author: lil bub
 ## Version: 2.0.0
 ## Dependencies: Questie, BVAddonSuite_Routing

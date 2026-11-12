@@ -84,7 +84,7 @@ function BV.choose(spots, cb)
 	local R = routing()
 	local N = R and R.Navigate
 	if not N then
-		ns.Print("BV Addon Suite - Routing is not loaded, so nothing can be planned (install BV Core, Map Data and Routing, and restart the game).")
+		ns.Print("The route planner is not loaded, so nothing can be planned: enable its three addons (Core, Map Data, Routing) and restart the game.")
 		return cb(false)
 	end
 	if #spots == 1 then return cb(spots[1]) end
@@ -214,18 +214,18 @@ end
 -- one line saying what BV is doing, for the window and the arrow
 local function describe(R, N, t)
 	if not N.steps then
-		if N.busy then return "BV is calculating the way..." end
+		if N.busy then return "Calculating the way..." end
 		local last = R.log and R.log[#R.log]
-		if st.sawSteps then return "BV's route has ended" end
-		return "BV has no route to " .. (t.name or "here") .. (last and (" - " .. last:gsub("^%d+:%d+:%d+%s+", "")) or "")
+		if st.sawSteps then return "The route has ended" end
+		return "No route to " .. (t.name or "here") .. (last and (" - " .. last:gsub("^%d+:%d+:%d+%s+", "")) or "")
 	end
 	local step = N.steps[N.current]
-	if not step then return "BV: no current step" end
+	if not step then return "No current step" end
 	local left
 	if step.kind == "walk" and type(step.path) == "table" then left = step.yards end
 	local say = safe(N.Say, N, step, left) or step.kind
 	local total = N.seconds and safe(N.Clock, N.seconds)
-	return string.format("BV route: step %d of %d - %s%s", N.current or 0, #N.steps, say, total and (" (about " .. total .. " in all)") or "")
+	return string.format("Route: step %d of %d - %s%s", N.current or 0, #N.steps, say, total and (" (about " .. total .. " in all)") or "")
 end
 
 -- The guide panel ---------------------------------------------------------------------------------------------
@@ -266,11 +266,11 @@ local function content(R, N, t)
 	local goal = (N.goal and N.goal.name) or t.name or "?"
 	if not N.steps then
 		if N.busy then return "FINDING THE WAY", "", goal, "", "", level, "" end
-		return "NO ROUTE", "", ns.bvText or "BV has no route", "", "", level, ""
+		return "NO ROUTE", "", ns.bvText or "No route", "", "", level, ""
 	end
 	local i = N.current or 1
 	local step = N.steps[i]
-	if not step then return "NO ROUTE", "", "BV: no current step", "", "", level, "" end
+	if not step then return "NO ROUTE", "", "No current step", "", "", level, "" end
 	local parts = safe(N.Parts, N, step) or {}
 	local head = tostring(parts.head or step.kind or ""):upper()
 	local count = #N.steps > 1 and string.format("%d/%d", i, #N.steps) or ""
@@ -352,6 +352,7 @@ function BV.refresh()
 	manageBVGuide(routing(), ns.getTarget() ~= nil and ns.cfg("hideBVGuide"))
 	if panel and not ns.cfg("guidePanel") then panel:Hide() end
 	if not ns.cfg("guidePanel") and ns.HUD then ns.HUD.hide() end
+	if ns.HUD and ns.HUD.refresh then ns.HUD.refresh() end
 end
 
 -- Riding something that carries you (a tram, a boat, a zeppelin): your position changes fast while your own speed
@@ -407,12 +408,12 @@ local function route(now)
 	end
 	if not t then
 		if N and st.goal then safe(N.Stop, N, true) end
-		st.goal, st.key, st.sawSteps, st.path = nil, nil, nil, nil
+		st.goal, st.key, st.sawSteps, st.path, st.ended = nil, nil, nil, nil, nil
 		ns.bvText = nil
 		return
 	end
 	if not N then
-		ns.bvText = "BV Addon Suite - Routing is not loaded: install BV Core, Map Data and Routing and restart the game"
+		ns.bvText = "The route planner is not loaded: enable its three addons (Core, Map Data, Routing) and restart the game"
 		return
 	end
 	local px, py = ns.HBD():GetPlayerWorldPosition()
@@ -424,19 +425,19 @@ local function route(now)
 	-- a new destination: BV plans it
 	if key ~= st.key then
 		if N.busy then
-			ns.bvText = "BV is still busy with the last route..."
+			ns.bvText = "Still working on the last route..."
 			return
 		end
 		local goal = makeGoal(R, t)
 		if not goal then
-			ns.bvText = "BV cannot place this destination on a continent map"
+			ns.bvText = "This destination cannot be placed on a continent map"
 			return
 		end
 		st.key, st.goal, st.startAt, st.sawSteps, st.stoppedByUser = key, goal, now, nil, nil
 		local ok, err = pcall(N.Start, N, goal)
 		if not ok then
 			st.goal = nil
-			ns.bvText = "BV error: " .. tostring(err)
+			ns.bvText = "Route error: " .. tostring(err)
 		end
 		return
 	end
@@ -451,6 +452,9 @@ local function route(now)
 	if N.steps and N.goal == st.goal then st.sawSteps = true end
 	watchRide(R, N, N.steps and N.goal == st.goal and N.steps[N.current] or nil, now)
 	ns.bvText = describe(R, N, t)
+	-- the route has ended (arrived, or ended by hand): the HUD closes and the arrow has nothing left to follow. While
+	-- you are still far off and did not end it, it is planned again instead (above), and the HUD stays
+	st.ended = (st.sawSteps and not N.steps and not N.busy and (st.stoppedByUser or ns.dist(px, py, t.x, t.y) <= 25)) or false
 	local step = N.steps and N.goal == st.goal and N.steps[N.current]
 	if step and step.kind == "walk" and type(step.path) == "table" and #step.path >= 2 then
 		-- the leg you walk: only when it is another leg or BV planned it again (its path is a new table), or something
@@ -464,6 +468,10 @@ local function route(now)
 		-- a lift, a flight, a ride: nothing to draw, the line says what to do
 		st.sigSteps, st.path = nil, nil
 		ns.clearRoute()
+	elseif not N.busy then
+		-- no route (none found, or it has ended): nothing for the arrow to follow
+		st.sigSteps, st.path = nil, nil
+		ns.clearRoute()
 	end
 end
 
@@ -472,7 +480,7 @@ local function tick(now)
 	local t = ns.getTarget()
 	local R = routing()
 	local N = R and R.Navigate
-	if t and N and ns.cfg("guidePanel") then
+	if t and N and ns.cfg("guidePanel") and not st.ended then
 		-- the HUD (BV's own guide window, built by BV's own code, HUD.lua); the plain panel only if that cannot be
 		if ns.HUD and ns.HUD.paint(R, N, t) then
 			if panel then panel:Hide() end
@@ -495,7 +503,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 	local ok, err = pcall(tick, GetTime())
 	if not ok and not st.err then
 		st.err = err
-		ns.Print("|cffff4040BV routing error:|r " .. tostring(err))
+		ns.Print("|cffff4040routing error:|r " .. tostring(err))
 	end
 end)
 
@@ -503,15 +511,15 @@ end)
 function BV.report()
 	local P = ns.Print
 	local R = routing()
-	P("BV Routing: " .. (R and "loaded" or "|cffff4040not loaded|r (install BV Core, Map Data and Routing, then restart the game)"))
+	P("Route planner: " .. (R and "loaded" or "|cffff4040not loaded|r (enable its three addons: Core, Map Data, Routing; then restart the game)"))
 	if not R then return end
 	local N = R.Navigate
 	local t = ns.getTarget()
 	P("destination: " .. (t and (t.name or "?") or "none (pick a quest or NPC in Pathy)"))
-	P("BV's state: " .. (N.busy and "calculating" or N.steps and "has a route" or "no route"))
+	P("planner's state: " .. (N.busy and "calculating" or N.steps and "has a route" or "no route"))
 	local level = safe(function() return R.Level:Name(R.Level:Current()) end)
 	local z = heightNow()
-	P(string.format("you are on BV's level: %s; BV's height measurement: %s", tostring(level or "unknown"), z and string.format("%.1f yd", z) or "none (too few NPCs near)"))
+	P(string.format("you are on level: %s; height measurement: %s", tostring(level or "unknown"), z and string.format("%.1f yd", z) or "none (too few NPCs near)"))
 	if N.steps then
 		P(string.format("plan: %d steps, about %s in all", #N.steps, N.seconds and safe(N.Clock, N.seconds) or "?"))
 		for i, step in ipairs(N.steps) do
@@ -521,6 +529,6 @@ function BV.report()
 		end
 	end
 	local p = ns.getRoute()
-	P(string.format("Pathy is following: %s", p and string.format("BV's leg (%d points, %s, %d yd left)", p.n, p.z and "with heights" or "no heights", floor(p.remaining or 0)) or "nothing"))
-	for i = max(1, #(R.log or {}) - 4), #(R.log or {}) do P("  BV log: " .. R.log[i]) end
+	P(string.format("Pathy is following: %s", p and string.format("the walking leg (%d points, %s, %d yd left)", p.n, p.z and "with heights" or "no heights", floor(p.remaining or 0)) or "nothing"))
+	for i = max(1, #(R.log or {}) - 4), #(R.log or {}) do P("  planner log: " .. R.log[i]) end
 end

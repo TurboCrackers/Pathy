@@ -20,7 +20,7 @@ local function Print(...) print("|cff66ccffPathy:|r", ...) end
 local DEFAULTS = {
 	arrow = true, arrowSize = 0.55, arrowAlpha = 0.45, arrowColour = { 0.75, 0.75, 0.75 }, arrowDirColour = true,
 	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
-	guidePanel = true, hideBVGuide = true, silenceBV = true,
+	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
 	windowAlpha = 0.92, uiScale = 1, minimapButton = true, followTracked = true,
 }
@@ -255,7 +255,7 @@ local function goTo(spots, info, chosen)
 	-- Which place is quickest is BV's to say (it knows other continents, boats, zeppelins and lifts)
 	if chosen == nil then return ns.BV.choose(spots, function(p) goTo(spots, info, p) end) end
 	local pick, trip = chosen, nil
-	if not pick then return Print("BV finds no way to any place for that") end
+	if not pick then return Print("No way found to any of those places") end
 	target = {
 		x = pick.x, y = pick.y, instance = pick.instance, z = pick.z, uiMap = pick.uiMap,
 		name = pick.name or info.name or "?", quest = info.quest or "", questId = info.questId, kind = info.kind,
@@ -532,7 +532,7 @@ end
 -- While guiding: what BV is doing (BV.lua keeps it up to date), the one line the window and the arrow show.
 local function noRouteText()
 	if not target then return end
-	return ns.bvText or "waiting for BV..."
+	return ns.bvText or "waiting for the route..."
 end
 
 -- The window. Its own block, so its many locals end with it (Lua allows 200 per file); f and allEntries are
@@ -1841,7 +1841,7 @@ function applied(key)
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
-	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV") and ns.BV then ns.BV.refresh() end
+	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton") and ns.BV then ns.BV.refresh() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
 end
@@ -1986,10 +1986,11 @@ checkbox(S, "minimapButton", "Pathy button on the minimap", R, -60)
 header(S, "Questie", R, -102)
 checkbox(S, "followTracked", "Guide to the quest I focus in Questie's tracker", R, -120)
 slider(S, "arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", R + 4, -156, 1, 120, 1, "%d yd")
-header(S, "HUD (BV's route)", R, -216)
-checkbox(S, "guidePanel", "Show the HUD: a copy of BV's guide window, with its buttons (drag it anywhere)", R, -234)
-checkbox(S, "hideBVGuide", "Hide BV's own guide window while Pathy guides (it comes back afterwards)", R, -270)
-checkbox(S, "silenceBV", "Silence BV's chat messages (they stay in BV's log and /pathy bv)", R, -306)
+header(S, "HUD", R, -216)
+checkbox(S, "guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)", R, -234)
+checkbox(S, "hideBVGuide", "Hide the route planner's own guide window while Pathy guides (it comes back afterwards)", R, -270)
+checkbox(S, "silenceBV", "Silence the route planner's chat messages (they stay in its log and in /pathy route)", R, -306)
+checkbox(S, "showLogButton", "Show the log button on the HUD (what the route planner did for this way)", R, -342)
 
 header(S, "Text under the arrow", L, -372)
 slider(S, "textAlpha", "Opacity", L + 4, -392, 0.05, 1, 0.05, "%d%%", 100)
@@ -2031,7 +2032,7 @@ function registerOptionsEntry()
 	d:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 0, -8)
 	d:SetPoint("RIGHT", -16, 0)
 	d:SetJustifyH("LEFT")
-	d:SetText("A 3D arrow, and a copy of BV's guide window, that lead you to quest givers, turn-ins, your map pin or your target along BV's route.\n\n"
+	d:SetText("A 3D arrow and a guide window that lead you to quest givers, turn-ins, your map pin or your target along a planned route (walls, stairs, lifts, boats and zeppelins included).\n\n"
 		.. "Pathy's settings are in their own window, so you can see the arrow change while you adjust it. "
 		.. "You can also open it with /pathy config, or by shift-clicking Pathy's minimap button.")
 	local b = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
@@ -2284,19 +2285,19 @@ SlashCmdList.PATHY = function(msg)
 		PathyDB[key] = not cfg(key)
 		applied(key)
 		Print(({ arrow = "arrow", minimapButton = "minimap button" })[key] .. " " .. onOff(cfg(key)))
-	elseif lower == "bv" then
+	elseif lower == "route" or lower == "bv" then
 		ns.BV.report()
 	elseif lower == "hud" then
 		PathyDB.guidePanel = not cfg("guidePanel")
 		applied("guidePanel")
-		Print("HUD " .. onOff(cfg("guidePanel")) .. " (drag it to move it; right-click it for its menu; |cffffff00/pathy bv|r says what BV planned)")
+		Print("HUD " .. onOff(cfg("guidePanel")) .. " (drag it to move it; right-click it for its menu; |cffffff00/pathy route|r says what was planned)")
 	elseif lower == "help" then
 		Print("/pathy  - open the quest list (click one to walk to its NPC)")
 		Print("/pathy pin  - walk to your map pin    /pathy target  - walk to the NPC you have targeted")
 		Print("/pathy <name>  - walk to the first quest or NPC in the list matching that text")
 		Print("/pathy stop  - stop guiding")
-		Print("/pathy bv  - what BV Addon Suite planned for the current destination, and what Pathy is drawing")
-		Print("/pathy hud  - show or hide the HUD (a copy of BV's guide window)")
+		Print("/pathy route  - what was planned for the current destination, and what Pathy is drawing")
+		Print("/pathy hud  - show or hide the HUD")
 		Print("/pathy arrow | minimap  - turn the arrow / the minimap button on or off")
 		Print("/pathy config  - settings: the arrow's and dots' size, opacity, colour, position...")
 	else

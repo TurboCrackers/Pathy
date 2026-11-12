@@ -83,6 +83,28 @@ local function tidy(f, N)
 	f.next:SetShown(not redundant)
 end
 
+-- The buttons along the top: the export button is not wanted, the log button only if the setting says so, and the
+-- others close up over the gaps
+local function layout(f)
+	local R = ns.routing()
+	local M = R and R.ns.DesignSystem and R.ns.DesignSystem.Metrics
+	local function at(frame, point, rel, relPoint, x, y)
+		frame:ClearAllPoints()
+		if M and M.Point then M.Point(frame, point, rel, relPoint, x, y) else frame:SetPoint(point, rel, relPoint, x, y) end
+	end
+	if f.export then f.export:Hide() end
+	local showLog = ns.cfg("showLogButton") and true or false
+	f.log:SetShown(showLog)
+	at(f.log, "RIGHT", f.restart, "LEFT", -4, 0)
+	at(f.safe, "RIGHT", showLog and f.log or f.restart, "LEFT", -4, 0)
+	at(f.count, "RIGHT", f.safe, "LEFT", -6, 0)
+end
+
+function HUD.refresh()
+	local f = obj and obj.frame
+	if f then layout(f) end
+end
+
 -- BV's constructor on Pathy's own object: the frame it makes is ours
 local function build(R)
 	if failed then return end
@@ -107,6 +129,18 @@ local function build(R)
 	f:SetFrameStrata("LOW")
 	f:SetFrameLevel(10)
 	f:SetToplevel(false)
+	-- the buttons' tooltips in Pathy's words, and the layout without the export button
+	local UI2 = R.ns.UI
+	local function tip(widget, title, body)
+		if widget then pcall(UI2.AttachTooltip, UI2, widget, title, body) end
+	end
+	tip(f.stop, "End the way", "Ends the way and the guide.")
+	tip(f.restart, "Search anew", "The way to the same place searched again from where you are now.")
+	tip(f.log, "Log", "What the route planner did for this way: the plan, its steps, levels, new searches.")
+	tip(f.safe, "Safe way", "Switches this way between safe (keeps to roads, swims little, goes round zones above your level) and normal, and searches it again.")
+	tip(f.flightTip, "Flight points not known", "A flight map shows only its own continent. Talk to a flight master there and open the flight map once: the way then uses the flight points you have.")
+	f.guideHelp = "The arrow points along the route. Drag the guide to move it; right-click it for its menu."
+	layout(f)
 	-- not BV's window: its own placement, ticker and menu are not wanted
 	f:SetScript("OnShow", nil)
 	f:SetScript("OnHide", nil)
@@ -205,7 +239,7 @@ function HUD.paint(R, N, t)
 	if not (N.steps or N.busy) then
 		-- no route: BV's own window would be gone here; this one says so
 		obj:SetHead("NO ROUTE", "")
-		obj:SetNow(ns.bvText or "BV has no route")
+		obj:SetNow(ns.bvText or "No route")
 		f.target:SetText("")
 		f.next:SetText("")
 		f.time:SetText("")
