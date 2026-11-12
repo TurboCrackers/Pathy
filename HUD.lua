@@ -100,7 +100,15 @@ local function layout(f)
 	f.log:SetShown(showLog)
 	at(f.log, "RIGHT", f.restart, "LEFT", -4, 0)
 	at(f.safe, "RIGHT", showLog and f.log or f.restart, "LEFT", -4, 0)
-	at(f.count, "RIGHT", f.safe, "LEFT", -6, 0)
+	if f.lockOn then
+		for _, b in ipairs({ f.lockOn, f.lockOff }) do
+			if M and M.Size then M.Size(b, 20, 20) else b:SetSize(20, 20) end
+			at(b, "RIGHT", f.safe, "LEFT", -4, 0)
+		end
+		at(f.count, "RIGHT", f.lockOff, "LEFT", -6, 0)
+	else
+		at(f.count, "RIGHT", f.safe, "LEFT", -6, 0)
+	end
 end
 
 function HUD.refresh()
@@ -154,26 +162,31 @@ local function build(R)
 	-- tooltip, so a tooltip on any button vanished within a twentieth of a second. That one Hide is made to do
 	-- nothing: the painter's own SetShown still shows and hides the strip as the note comes and goes.
 	if f.flightTip then f.flightTip.Hide = function() end end
-	-- the padlock in the bottom right corner: locked, the HUD cannot be dragged
-	local lock = CreateFrame("Button", nil, f)
-	lock:SetSize(16, 16)
-	lock:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
-	lock:SetFrameLevel(f:GetFrameLevel() + 5)
-	local lockTex = lock:CreateTexture(nil, "ARTWORK")
-	lockTex:SetAllPoints()
-	local function paintLock()
-		local locked = ns.cfg("hudLocked") and true or false
-		lockTex:SetTexture(locked and "Interface\\Buttons\\LockButton-Locked-Up" or "Interface\\Buttons\\LockButton-Unlocked-Up")
-		lockTex:SetAlpha(locked and 1 or 0.55)
+	-- the padlock: one more of the small icon buttons along the top, made the way the others are (BV's own icon
+	-- button, in the window's accent color). Two of them, one over the other: locked and unlocked
+	local kind = obj.style.materialProfile == "interface" and "icon-only" or "ghost"
+	local function padlock(icon, name, title, body)
+		local b = UI2:IconButton(f, icon, function()
+			PathyDB.hudLocked = not ns.cfg("hudLocked")
+			HUD.refresh()
+			if ns.refreshSettings then ns.refreshSettings() end
+		end, kind)
+		tip(b, title, body)
+		return b
 	end
-	f.pathyPaintLock = paintLock
-	paintLock()
-	lock:SetScript("OnClick", function()
-		PathyDB.hudLocked = not ns.cfg("hudLocked")
-		paintLock()
-		if ns.refreshSettings then ns.refreshSettings() end
+	local okLock = pcall(function()
+		f.lockOn = padlock("lock", "lock", "Position locked", "The HUD stays where it is. Click to unlock it.")
+		f.lockOff = padlock("lock-open", "lock-open", "Position unlocked", "Drag the HUD anywhere. Click to lock it in place.")
 	end)
-	tip(lock, "Lock position", "Locked, the HUD stays where it is. Unlocked, drag it anywhere.")
+	if not okLock then f.lockOn, f.lockOff = nil, nil end
+	f.pathyPaintLock = function()
+		if not f.lockOn then return end
+		local locked = ns.cfg("hudLocked") and true or false
+		f.lockOn:SetShown(locked)
+		f.lockOff:SetShown(not locked)
+	end
+	layout(f)
+	f.pathyPaintLock()
 	-- not BV's window: its own placement, ticker and menu are not wanted
 	f:SetScript("OnShow", nil)
 	f:SetScript("OnHide", nil)
