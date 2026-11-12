@@ -1090,8 +1090,8 @@ local function countShown(node, words, all)
 	return n
 end
 
-function f.Refresh()
-	if not f:IsShown() then return end
+-- the summary at the top: what is being guided to and what to do now; cheap, so it is also kept current live
+local function paintStatus()
 	if target then
 		local why = noRouteText()
 		status:SetText("|cff66ff66Guiding to|r " .. target.name .. (target.quest ~= "" and ("  |cff999999(" .. target.quest .. ")|r") or "")
@@ -1099,6 +1099,23 @@ function f.Refresh()
 	else
 		status:SetText("|cff999999Click a quest or an NPC to walk there.|r")
 	end
+end
+do
+	local since, lastTarget, lastText = 0
+	f:HookScript("OnUpdate", function(_, elapsed)
+		since = since + elapsed
+		if since < 0.2 then return end
+		since = 0
+		local text = target and noRouteText()
+		if target == lastTarget and text == lastText then return end -- nothing new
+		lastTarget, lastText = target, text
+		paintStatus()
+	end)
+end
+
+function f.Refresh()
+	if not f:IsShown() then return end
+	paintStatus()
 	local ok, nodes, npcs = pcall(buildLists)
 	if not ok then
 		status:SetText("|cffff6666Questie is still loading; try again in a moment.|r")
