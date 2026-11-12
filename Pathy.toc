@@ -2,7 +2,7 @@
 ## Title: Pathy
 ## Notes: Pick a quest giver or turn-in and be led there by a 3D arrow, with a guide window, along a planned route (walls, stairs, lifts, boats and zeppelins included). Uses Questie's WoW: Forever database for the places.
 ## Author: lil bub
-## Version: 2.3.0
+## Version: 2.3.1
 ## Dependencies: Questie, BVAddonSuite_Routing
 ## SavedVariables: PathyDB
 
