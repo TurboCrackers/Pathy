@@ -1278,12 +1278,27 @@ arrow.climb = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 arrow.climb:SetPoint("CENTER")
 arrow.dist = arrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 arrow.dist:SetPoint("TOP", arrow.climb, "BOTTOM", 0, -1)
+arrow:SetFrameLevel(59)
 
-local quads = {}
+-- the HUD's own arrow, in its medallion: a second one, so that the HUD and the simple arrow are independent
+local hudArrow = CreateFrame("Frame", "PathyHudArrow", UIParent)
+hudArrow:SetAllPoints()
+hudArrow:SetFrameStrata("LOW")
+hudArrow:SetFrameLevel(60) -- above the HUD (HUD.lua)
+hudArrow:Hide()
+hudArrow.climb = hudArrow:CreateFontString(nil, "OVERLAY", "GameFontNormal") -- (never given text)
+hudArrow.dist = hudArrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+
+-- which of the two is being drawn: its frame, its textures, its text
+local simpleA = { frame = arrow, quads = {}, climb = arrow.climb, dist = arrow.dist }
+local hudA = { frame = hudArrow, quads = {}, climb = hudArrow.climb, dist = hudArrow.dist }
+local A = simpleA
+
 local function quad(i)
+	local quads = A.quads
 	local t = quads[i]
 	if not t then
-		t = arrow:CreateTexture(nil, "ARTWORK")
+		t = A.frame:CreateTexture(nil, "ARTWORK")
 		t:SetTexture(WHITE)
 		if t.SetSnapToPixelGrid then t:SetSnapToPixelGrid(false); t:SetTexelSnappingBias(0) end
 		quads[i] = t
@@ -1311,9 +1326,9 @@ local function drawQuad(t, a, b, c, d, ox, oy)
 end
 
 local function hideArrowShape()
-	for _, t in ipairs(quads) do t:Hide() end
-	arrow.climb:SetText("")
-	arrow.dist:SetText("")
+	for _, t in ipairs(A.quads) do t:Hide() end
+	A.climb:SetText("")
+	A.dist:SetText("")
 end
 
 -- green while heading the right way, yellow to the side, red behind you (off: 0 ahead .. pi behind)
@@ -1335,14 +1350,13 @@ ns.arrowRadius = function() return ARROW_PX * cfg("arrowSize") / 2 end
 -- Where the arrow is drawn, how big (nose to tail, in pixels) and in what colour: in the medallion of the HUD
 -- (HUD.lua), at its size and in its accent colour, while that is shown; else where the player put it. false: the
 -- HUD is showing a symbol there (a flight, a lift) and the arrow stays away.
-local function arrowSpot()
+local function hudSpot()
 	local hud = ns.HUD
 	if hud and hud.arrowSpot then
 		local x, y, size, r, g, b = hud.arrowSpot()
 		if x == false then return false end
 		if x then return x, y, size, { r, g, b } end
 	end
-	return cfg("arrowX") * UIParent:GetWidth(), cfg("arrowY") * UIParent:GetHeight()
 end
 
 -- Draws the arrow at screen spot (ax, ay), pointing along world direction (dE, dN, dU) as the current camera
@@ -1441,13 +1455,13 @@ local function renderArrow(ax, ay, dE, dN, dU, sizePx, colour)
 		t:SetVertexColor(r * f.shade, g * f.shade, b * f.shade, alpha)
 		drawQuad(t, f.pts[1], f.pts[2], f.pts[3], f.pts[4], ox, oy)
 	end
-	for i = #faces + 1, #quads do quads[i]:Hide() end
+	for i = #faces + 1, #A.quads do A.quads[i]:Hide() end
 
-	arrow.climb:ClearAllPoints()
-	arrow.climb:SetPoint("TOP", UIParent, "BOTTOMLEFT", cfg("textX") * UIParent:GetWidth(), cfg("textY") * UIParent:GetHeight())
+	A.climb:ClearAllPoints()
+	A.climb:SetPoint("TOP", UIParent, "BOTTOMLEFT", cfg("textX") * UIParent:GetWidth(), cfg("textY") * UIParent:GetHeight())
 	local tc, ta = cfg("textColour"), cfg("textAlpha")
-	arrow.climb:SetTextColor(tc[1], tc[2], tc[3], ta)
-	arrow.dist:SetTextColor(tc[1], tc[2], tc[3], ta)
+	A.climb:SetTextColor(tc[1], tc[2], tc[3], ta)
+	A.dist:SetTextColor(tc[1], tc[2], tc[3], ta)
 end
 
 -- While unlocked (settings): a box round the arrow to drag it by.
@@ -1654,33 +1668,44 @@ driver:SetScript("OnUpdate", function(_, dt)
 	local ok, guiding, climb = pcall(frame, dt)
 	if not ok then report(guiding); guiding = false end
 
-	local ax, ay, hudSize, hudColour = arrowSpot()
-	if ax == false then return hideArrowShape() end -- the HUD shows a symbol in the medallion
-	if (hudSize or cfg("arrow")) and not arrow:IsShown() then arrow:Show() end -- the HUD's arrow does not depend on the simple arrow setting
-	if not hudSize and not cfg("arrow") then
+	-- the HUD's arrow (in its medallion; nothing while the HUD shows a symbol there or is not shown)
+	local hx, hy, hsize, hcolour = hudSpot()
+	A = hudA
+	if hx then
+		hudArrow:Show()
+		if guiding and smooth.E then
+			setCamera(GetPlayerFacing() or 0, rad(ARROW_TILT), 0, 0, 0, 1)
+			local okA, err = pcall(renderArrow, hx, hy, smooth.E, smooth.N, smooth.U, hsize, hcolour)
+			if not okA then report(err); hideArrowShape() end
+		else
+			hideArrowShape()
+		end
+	else
+		hudArrow:Hide()
+		hideArrowShape()
+	end
+
+	-- the simple arrow, on its own: where the player put it, with the instructions under it
+	A = simpleA
+	if not cfg("arrow") then
 		if arrow:IsShown() then arrow:Hide(); hideArrowShape() end
 		return
 	end
-	if not arrow:IsShown() then return end
+	if not arrow:IsShown() then arrow:Show() end
+	local ax, ay = cfg("arrowX") * UIParent:GetWidth(), cfg("arrowY") * UIParent:GetHeight()
 	if guiding and smooth.E then
 		-- The arrow is always drawn as seen from the default tilt, turned only by which way the character faces
 		setCamera(GetPlayerFacing() or 0, rad(ARROW_TILT), 0, 0, 0, 1)
-		local okA, err = pcall(renderArrow, ax, ay, smooth.E, smooth.N, smooth.U, hudSize, hudColour)
+		local okA, err = pcall(renderArrow, ax, ay, smooth.E, smooth.N, smooth.U)
 		if not okA then report(err); return hideArrowShape() end
-		if hudSize then
-			-- in the HUD's medallion: the HUD says the yards and what to do, the arrow's own tilt shows up and down
-			arrow.climb:SetText("")
-			arrow.dist:SetText("")
-		else
-			-- the simple arrow: what to do now (and whether it is up or down), and where to, under the arrow
-			local hint = (climb and climb > CLIMB and "  ^ up") or (climb and climb < -CLIMB and "  v down") or ""
-			arrow.climb:SetText((ns.simpleNow or "") .. hint)
-			arrow.dist:SetText(ns.simpleTarget or "")
-		end
+		-- what to do now (and whether it is up or down), and where to, under the arrow
+		local hint = (climb and climb > CLIMB and "  ^ up") or (climb and climb < -CLIMB and "  v down") or ""
+		arrow.climb:SetText((ns.simpleNow or "") .. hint)
+		arrow.dist:SetText(ns.simpleTarget or "")
 	elseif target and not handle:IsShown() then
 		hideArrowShape()
 		local why = noRouteText()
-		if why and not hudSize and not (ns.ended and ns.ended()) then
+		if why and not (ns.ended and ns.ended()) then
 			arrow.climb:ClearAllPoints()
 			arrow.climb:SetPoint("TOP", UIParent, "BOTTOMLEFT", ax, ay)
 			arrow.climb:SetText("|cffff9933Pathy: " .. why .. "|r")
@@ -1698,6 +1723,7 @@ driver:SetScript("OnUpdate", function(_, dt)
 end)
 
 local function updateArrowShown()
+	A = simpleA
 	if cfg("arrow") then arrow:Show() else arrow:Hide(); hideArrowShape() end
 end
 
@@ -2003,7 +2029,6 @@ local function buildSettings(content)
 	end
 
 	local g = section("General")
-	g.check("arrow", "Enable the simple guide arrow (the arrow with the instructions under it, on its own)")
 	g.check("minimapButton", "Pathy button on the minimap")
 	g.check("followTracked", "Guide to the quest I focus in Questie's tracker")
 	g.slider("arrowAhead", "Arrow looks ahead (short follows bends, long is steadier)", 1, 120, 1, "%d yd")
@@ -2044,6 +2069,7 @@ local function buildSettings(content)
 	end })
 
 	local w = section("Simple Arrow Settings")
+	w.check("arrow", "Show the simple arrow (the arrow with the instructions under it; the HUD has its own)")
 	w.slider("arrowSize", "Arrow size", 0.2, 2, 0.05, "%d%%", 100)
 	w.slider("arrowAlpha", "Arrow opacity", 0.05, 1, 0.05, "%d%%", 100)
 	w.swatch("arrowColour", "Arrow color")
