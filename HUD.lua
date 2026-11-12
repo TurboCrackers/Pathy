@@ -108,6 +108,7 @@ function HUD.refresh()
 	if f then
 		layout(f)
 		f:SetAlpha(ns.cfg("hudAlpha") or 1)
+		if f.pathyPaintLock then f.pathyPaintLock() end
 		place(f)
 	end
 end
@@ -153,10 +154,31 @@ local function build(R)
 	-- tooltip, so a tooltip on any button vanished within a twentieth of a second. That one Hide is made to do
 	-- nothing: the painter's own SetShown still shows and hides the strip as the note comes and goes.
 	if f.flightTip then f.flightTip.Hide = function() end end
+	-- the padlock in the bottom right corner: locked, the HUD cannot be dragged
+	local lock = CreateFrame("Button", nil, f)
+	lock:SetSize(16, 16)
+	lock:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
+	lock:SetFrameLevel(f:GetFrameLevel() + 5)
+	local lockTex = lock:CreateTexture(nil, "ARTWORK")
+	lockTex:SetAllPoints()
+	local function paintLock()
+		local locked = ns.cfg("hudLocked") and true or false
+		lockTex:SetTexture(locked and "Interface\\Buttons\\LockButton-Locked-Up" or "Interface\\Buttons\\LockButton-Unlocked-Up")
+		lockTex:SetAlpha(locked and 1 or 0.55)
+	end
+	f.pathyPaintLock = paintLock
+	paintLock()
+	lock:SetScript("OnClick", function()
+		PathyDB.hudLocked = not ns.cfg("hudLocked")
+		paintLock()
+		if ns.refreshSettings then ns.refreshSettings() end
+	end)
+	tip(lock, "Lock position", "Locked, the HUD stays where it is. Unlocked, drag it anywhere.")
 	-- not BV's window: its own placement, ticker and menu are not wanted
 	f:SetScript("OnShow", nil)
 	f:SetScript("OnHide", nil)
 	f:SetScript("OnDragStart", function(self)
+		if ns.cfg("hudLocked") then return end
 		self.pathyMoving = true
 		self:StartMoving()
 	end)

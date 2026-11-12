@@ -22,7 +22,7 @@ local DEFAULTS = {
 	arrowText = true, arrowX = 0.5, arrowY = 0.31, arrowAhead = 40,
 	guidePanel = true, hideBVGuide = true, silenceBV = true, showLogButton = false, simpleUI = false,
 	textAlpha = 0.9, textColour = { 1, 1, 1 }, textX = 0.5, textY = 0.29,
-	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, uiScale = 1, minimapButton = true, followTracked = true,
+	windowAlpha = 0.92, windowColour = { 0.05, 0.05, 0.08 }, windowBorder = { 1, 1, 1 }, hudColourOn = false, hudColour = { 1, 0.82, 0 }, hudScale = 1, hudAlpha = 1, hudLocked = false, uiScale = 1, minimapButton = true, followTracked = true,
 }
 local function cfg(key)
 	local v = PathyDB and PathyDB[key]
@@ -1817,13 +1817,14 @@ CreateFrame("Button", nil, S, "UIPanelCloseButton"):SetPoint("TOPRIGHT", -2, -2)
 local refreshers = {} -- each puts its widget back in line with the saved setting
 local function refreshSettings() for _, fn in ipairs(refreshers) do fn() end end
 onArrowMoved = refreshSettings
+ns.refreshSettings = refreshSettings
 
 -- a setting changed: things that need more than being read next frame
 function applied(key)
 	if key == "arrow" then updateArrowShown() end
 	if key == "windowAlpha" or key == "uiScale" or key == "windowColour" or key == "windowBorder" then f.ApplyLook() end
 	if key == "minimapButton" then updateMinimapButton() end
-	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI" or key == "hudScale" or key == "hudAlpha" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
+	if (key == "guidePanel" or key == "hideBVGuide" or key == "silenceBV" or key == "showLogButton" or key == "simpleUI" or key == "hudScale" or key == "hudAlpha" or key == "hudLocked" or key == "hudColourOn" or key == "hudColour") and ns.BV then ns.BV.refresh() end
 
 	if (key == "arrowX" or key == "arrowY") and handle:IsShown() then setArrowUnlocked(true) end
 end
@@ -2039,6 +2040,7 @@ local function buildSettings(content)
 
 	local h = section("Detailed Widget Settings")
 	h.check("guidePanel", "Show the HUD (drag it anywhere, right-click it for its menu)")
+	h.check("hudLocked", "Lock the HUD's position (the padlock on the HUD does the same)")
 	h.slider("hudScale", "HUD size", 0.5, 2, 0.05, "%d%%", 100)
 	h.slider("hudAlpha", "HUD opacity", 0.2, 1, 0.05, "%d%%", 100)
 	h.check("hudColourOn", "Use my own color for the HUD's arrow instead of the theme's")
